@@ -60,11 +60,20 @@ impl Spelling {
 }
 /// The call's header up to the tool's name.
 const HEADER: &str = "call:";
-const NOT_A_CALL: &str = "a call that does not start with `call:NAME{`";
-const TEXT_AFTER_THE_OBJECT: &str = "text after the arguments closed";
-const EMPTY_KEY: &str = "a key without a name";
-const KEY_CUT_SHORT: &str = "a key the call's end cut short";
-const VALUE_CUT_SHORT: &str = "a value the call's end cut short";
+
+/// The tool's name in a header up to its `{`, or why the header is no call's: no `call:` prefix
+/// is text where a call should begin, an empty name a call without one, a name with whitespace in
+/// it text where the name should be.
+fn header_name(head: &str) -> Result<&str, MalformedReason> {
+    match head.strip_prefix(HEADER).map(str::trim) {
+        None => Err(MalformedReason::TextBetweenCalls),
+        Some("") => Err(MalformedReason::CallWithoutName),
+        Some(name) if name.contains(char::is_whitespace) => {
+            Err(MalformedReason::TextWhereTheNameShouldBe)
+        }
+        Some(name) => Ok(name),
+    }
+}
 
 /// The events of one call, from the bytes after `<|tool_call>`.
 #[derive(Clone, Debug)]
@@ -174,7 +183,7 @@ impl Assembler {
         } else if !terminal.is_empty() {
             out.push(Event::Malformed {
                 text: Text::uncounted(terminal),
-                why: MalformedReason::Other(NOT_A_CALL.into()),
+                why: MalformedReason::BlockWithoutACompleteCall,
             });
         }
         self.done = true;
@@ -216,10 +225,8 @@ impl Assembler {
         let Some(brace) = rest.find('{') else {
             return 0;
         };
-        let head = &rest[..brace];
-        let name = head.strip_prefix(HEADER).map(str::trim);
-        match name {
-            Some(name) if !name.is_empty() && !name.contains(char::is_whitespace) => {
+        match header_name(&rest[..brace]) {
+            Ok(name) => {
                 self.started = true;
                 out.push(Event::ToolCallStart {
                     index: self.index,
@@ -234,10 +241,10 @@ impl Assembler {
                 });
                 self.stage = Stage::Key;
             }
-            _ => {
+            Err(why) => {
                 out.push(Event::Malformed {
                     text: Text::uncounted(&rest[..=brace]),
-                    why: MalformedReason::Other(NOT_A_CALL.into()),
+                    why,
                 });
                 self.stage = Stage::Closed;
             }
@@ -264,7 +271,7 @@ impl Assembler {
             // value that follows it stays inside a valid object.
             out.push(Event::Malformed {
                 text: Text::uncounted(&rest[..=colon]),
-                why: MalformedReason::Other(EMPTY_KEY.into()),
+                why: MalformedReason::EmptyKey,
             });
             let mut json = self.separator();
             json.push_str("\"\": ");
@@ -394,7 +401,7 @@ impl Assembler {
                 if space > 0 {
                     out.push(Event::Malformed {
                         text: Text::uncounted(&rest[..space]),
-                        why: MalformedReason::Other(VALUE_CUT_SHORT.into()),
+                        why: MalformedReason::ValueCutShort,
                     });
                 }
                 let next = &rest[space..];
@@ -463,18 +470,22 @@ impl Assembler {
     fn end(&mut self, out: &mut Events) {
         let held = std::mem::take(&mut self.carried);
         match self.stage {
-            Stage::Header if !held.is_empty() => out.push(Event::Malformed {
-                text: Text::uncounted(held),
-                why: MalformedReason::Other(NOT_A_CALL.into()),
-            }),
+            Stage::Header if !held.is_empty() => {
+                let why = header_name(&held)
+                    .map_or_else(|why| why, |_| MalformedReason::NameWithoutACall);
+                out.push(Event::Malformed {
+                    text: Text::uncounted(held),
+                    why,
+                });
+            }
             Stage::Key if !held.trim().is_empty() => out.push(Event::Malformed {
                 text: Text::uncounted(held),
-                why: MalformedReason::Other(KEY_CUT_SHORT.into()),
+                why: MalformedReason::KeyCutShort,
             }),
             Stage::Value if !held.trim().is_empty() || self.value_missing() => {
                 out.push(Event::Malformed {
                     text: Text::uncounted(held),
-                    why: MalformedReason::Other(VALUE_CUT_SHORT.into()),
+                    why: MalformedReason::ValueCutShort,
                 });
             }
             Stage::Text => {
@@ -486,7 +497,7 @@ impl Assembler {
                 }
                 out.push(Event::Malformed {
                     text: Text::default(),
-                    why: MalformedReason::Other(VALUE_CUT_SHORT.into()),
+                    why: MalformedReason::ValueCutShort,
                 });
             }
             _ if !held.is_empty() => out.push(Event::Dropped {
@@ -529,7 +540,7 @@ fn after_the_object(text: &str, out: &mut Events) -> usize {
         } else {
             Event::Malformed {
                 text: Text::uncounted(run),
-                why: MalformedReason::Other(TEXT_AFTER_THE_OBJECT.into()),
+                why: MalformedReason::TextAfterTheArguments,
             }
         });
     }
@@ -617,14 +628,11 @@ mod tests {
             .collect()
     }
 
-    fn malformed(events: &[Event]) -> Vec<(String, String)> {
+    fn malformed(events: &[Event]) -> Vec<(String, MalformedReason)> {
         events
             .iter()
             .filter_map(|event| match event {
-                Event::Malformed {
-                    text,
-                    why: MalformedReason::Other(why),
-                } => Some((text.text.clone(), why.to_string())),
+                Event::Malformed { text, why } => Some((text.text.clone(), *why)),
                 _ => None,
             })
             .collect()
@@ -833,7 +841,7 @@ mod tests {
             assert_eq!(arguments(&closed), expected, "{output:?}");
             assert_eq!(
                 malformed(&closed),
-                vec![(String::new(), VALUE_CUT_SHORT.to_string())],
+                vec![(String::new(), MalformedReason::ValueCutShort)],
                 "{output:?}"
             );
             assert!(
@@ -863,7 +871,7 @@ mod tests {
         assert_eq!(arguments(&held), r#"{"city": "Par<|"#);
         assert_eq!(
             malformed(&held),
-            vec![(String::new(), VALUE_CUT_SHORT.to_string())]
+            vec![(String::new(), MalformedReason::ValueCutShort)]
         );
         let held = run(&["call:f{city:<|\"|>Par<|"], true);
         assert_eq!(arguments(&held), r#"{"city": "Par"#);
@@ -887,19 +895,19 @@ mod tests {
         assert_eq!(arguments(&closed), r#"{"city": }"#);
         assert_eq!(
             malformed(&closed),
-            vec![(String::new(), VALUE_CUT_SHORT.to_string())]
+            vec![(String::new(), MalformedReason::ValueCutShort)]
         );
         assert_eq!(bytes(&closed), format!("call:get_weather{{city:{CLOSE}"));
         let second = run(&["call:get_weather{city:<|\"|>Paris<|\"|>,days:"], false);
         assert_eq!(arguments(&second), r#"{"city": "Paris", "days": }"#);
         assert_eq!(
             malformed(&second),
-            vec![(String::new(), VALUE_CUT_SHORT.to_string())]
+            vec![(String::new(), MalformedReason::ValueCutShort)]
         );
         let spaced = run(&["call:get_weather{city: "], false);
         assert_eq!(
             malformed(&spaced),
-            vec![(" ".to_string(), VALUE_CUT_SHORT.to_string())]
+            vec![(" ".to_string(), MalformedReason::ValueCutShort)]
         );
         let cut = run(&["call:get_weather{city:"], true);
         assert_eq!(arguments(&cut), r#"{"city": }"#);
@@ -932,7 +940,7 @@ mod tests {
             .iter()
             .any(|event| matches!(event, Event::ToolCallStart { .. })));
         assert_eq!(bytes(&not), format!("hello{{x:1}}{CLOSE}"));
-        assert_eq!(malformed(&not)[0].1, NOT_A_CALL);
+        assert_eq!(malformed(&not)[0].1, MalformedReason::TextBetweenCalls);
         // The space before the text is the template's wrapping, the text is reported: the same
         // two events however the bytes are cut.
         for pieces in [&["call:f{x:1} trailing"][..], &["call:f{x:1} ", "trailing"]] {
@@ -940,13 +948,38 @@ mod tests {
             assert_eq!(arguments(&tail), r#"{"x": 1}"#);
             assert_eq!(
                 malformed(&tail),
-                vec![("trailing".to_string(), TEXT_AFTER_THE_OBJECT.to_string())]
+                vec![(
+                    "trailing".to_string(),
+                    MalformedReason::TextAfterTheArguments
+                )]
             );
             assert!(tail.iter().any(|event| matches!(
                 event,
                 Event::Dropped { text, why: DropReason::Wrapper } if text.text == " "
             )));
             assert_eq!(bytes(&tail), format!("call:f{{x:1}} trailing{CLOSE}"));
+        }
+    }
+
+    #[test]
+    fn a_header_that_is_no_call_says_which_shape_it_saw() {
+        for (text, why) in [
+            ("hello{x:1}", MalformedReason::TextBetweenCalls),
+            ("call:{x:1}", MalformedReason::CallWithoutName),
+            (
+                "call:get weather{x:1}",
+                MalformedReason::TextWhereTheNameShouldBe,
+            ),
+            ("call:", MalformedReason::CallWithoutName),
+            ("call:get_weather", MalformedReason::NameWithoutACall),
+        ] {
+            let reasons = malformed(&run(&[text], false));
+            assert_eq!(reasons[0].1, why, "{text:?}");
+            assert_eq!(
+                reasons.last().map(|(_, why)| *why),
+                Some(MalformedReason::BlockWithoutACompleteCall),
+                "{text:?}: the close with no call started"
+            );
         }
     }
 
