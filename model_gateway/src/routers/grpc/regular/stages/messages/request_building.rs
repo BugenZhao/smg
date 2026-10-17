@@ -1,5 +1,7 @@
 //! Message request building stage: Build proto GenerateRequest for message requests
 
+use std::{borrow::Cow, sync::Arc};
+
 use async_trait::async_trait;
 use axum::response::Response;
 use tracing::error;
@@ -10,7 +12,10 @@ use crate::{
         error,
         grpc::{
             client::GenerateRequestBuildOptions,
-            common::stages::{helpers, BuildStage},
+            common::stages::{
+                helpers::{self, TagForStart},
+                BuildStage,
+            },
             context::{
                 stage_output, AttemptStamp, BuildOutput, ClientSelection, ExecutionPlan,
                 ExecutionPlanKind, PreparationOutput, RequestContext,
@@ -165,8 +170,9 @@ impl BuildStage for MessageRequestBuildingStage {
         // gate, the thought and then the calls from the first token (the
         // worker's `constrained_decoding_start` label; see
         // `utils::tool_constraints_for_worker`).
-        // The unshaped constraint stays on the attempt stamp: a retry gives
-        // the worker it selects the same shaping (`helpers::ToolConstraintStamp`).
+        // The unshaped constraint stays on the attempt stamp, or what derives
+        // the table's `auto` tag for a start: a retry gives the worker it
+        // selects the same shaping (`helpers::ToolConstraintStamp`).
         let tool_parser = ctx
             .components
             .parser_resolver
@@ -184,9 +190,9 @@ impl BuildStage for MessageRequestBuildingStage {
         // request allows under `auto`. When the worker's policy chose the
         // constraint, a retry re-selects only workers that decide alike
         // (`utils::WorkerDecoding::decides_alike`); what the request asked for
-        // suits any worker. The attempt stamp carries the tag unshaped like a
-        // forced call's, so the retry's worker shapes it for where its engine
-        // starts the grammar.
+        // suits any worker. The attempt stamp carries what derives the `auto`
+        // tag for a worker's start, so the retry's worker gets it shaped for
+        // where its own engine starts the grammar.
         let decoding = utils::WorkerDecoding::of(ctx.state.workers.as_ref());
         let decided = symphony::worker_constraint(
             decoding,
@@ -203,32 +209,39 @@ impl BuildStage for MessageRequestBuildingStage {
                 )
             },
             || {
-                let tools = ctx
+                // The tag shares the spec's tools where `tool_choice` narrows
+                // nothing (the common case): no copy of the schemas on the
+                // first attempt; a narrowed list is the one the narrowing owns.
+                let tools: Arc<[_]> = ctx
                     .tokenizer_arc()
                     .map(|tokenizer| {
-                        utils::template_tools(
+                        match utils::template_tools(
                             &spec.chat_tools,
                             messages_request.tool_choice.as_ref(),
                             tokenizer.renderer_capabilities(),
-                        )
+                        ) {
+                            Cow::Owned(narrowed) => Arc::from(narrowed),
+                            Cow::Borrowed([]) => Arc::default(),
+                            Cow::Borrowed(_) => Arc::clone(&spec.chat_tools),
+                        }
                     })
                     .unwrap_or_default();
-                symphony::auto_constraint_messages(
+                symphony::AutoTag::Messages {
                     parser,
-                    &names,
-                    &messages_request,
-                    &tools,
-                    require_reasoning,
-                    symphony::grammar_start_from(decoding.start),
-                    continued_final_message,
-                    &ctx.components.templates,
-                )
+                    names: names.clone(),
+                    request: Arc::clone(&messages_request),
+                    tools,
+                    reasoning_open: require_reasoning,
+                    continues: continued_final_message,
+                    templates: Arc::clone(&ctx.components.templates),
+                }
             },
         )
         .map_err(|why| error::bad_request("invalid_parser_configuration", why))?;
         if decided.by_policy {
             ctx.state.constraint_decided_on = Some(decoding);
         }
+        let auto_tag = decided.auto.map(|auto| -> Arc<dyn TagForStart> { auto });
         let tool_constraints = decided.constraint.map(|constraint| constraint.to_tuple());
         let unshaped_tool_constraints = tool_constraints.clone();
         let tool_constraints = utils::tool_constraints_for_worker(
@@ -328,11 +341,14 @@ impl BuildStage for MessageRequestBuildingStage {
             ctx.state.media_refs_forwarded = true;
         }
 
-        let tool_constraint = helpers::ToolConstraintStamp::capture(
-            unshaped_tool_constraints,
-            tool_parser.as_deref(),
-            &proto_request,
-        );
+        let tool_constraint = match auto_tag {
+            Some(auto_tag) => helpers::ToolConstraintStamp::capture_table(auto_tag, &proto_request),
+            None => helpers::ToolConstraintStamp::capture(
+                unshaped_tool_constraints,
+                tool_parser.as_deref(),
+                &proto_request,
+            ),
+        };
         spec.reasoning_in_prefill = require_reasoning;
         spec.symphony = assignment;
         Ok(BuildOutput {
