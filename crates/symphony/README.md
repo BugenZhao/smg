@@ -125,7 +125,43 @@ where one existed, and was checked in review against the recorded calls where no
 `cargo bench -p smg-symphony --bench throughput` measures what a table costs on its own: the bytes
 per second of a turn fed whole and in eight-byte pieces, one subject per call syntax, the bytes per
 second of prose with no marker in it, and the construction of an engine, which is the parser's
-per-request setup. A change to the decode path carries its rows.
+per-request setup. Over the recorded slices of `tests/fixtures/slices/` (per table, one output of
+each family: plain text, one call, parallel calls, a thought and a call, a malformed call) it
+measures the output fed whole, one character at a time and in pieces of about a token
+(`slice/<family>/{whole,chars,tokens}`, in bytes or tokens per second), the parts of the setup
+(`setup/{table,validate,scanner,declared,engine}`) and the adapters over the events a slice
+produces (`adapt/{chat_deltas,chat_message,messages_stream}`, per event). A change to the decode
+path carries its rows.
+
+#### Producing a throughput row
+
+A Symphony change carries a throughput row measured from this bench, not from a gateway bed:
+three interleaved repeats on one pinned core, against `main` built the same way.
+
+1. Build the bench on `main` and on the change, each in its own checkout and target directory:
+   `cargo bench -p smg-symphony --bench throughput --no-run` prints the binary's path. The two
+   binaries must carry the same rows: where `main`'s bench lacks a group the change measures (the
+   `slice` and `adapt` groups are this harness's), copy the change's `crates/symphony/benches/`
+   and `crates/symphony/tests/fixtures/slices/` into the `main` checkout before building there,
+   so each binary reads its own crate through one harness.
+2. Run the two binaries interleaved, three repeats each, pinned to one core, saving one baseline
+   per repeat, with the directory the baselines go to named outright (a bench binary run on its
+   own, outside `cargo bench`, writes to `./target/criterion` of the current directory otherwise):
+   `CRITERION_HOME=<baselines dir> taskset -c 7 <main binary> --bench --save-baseline main-1 'slice/thought_call/tokens'`,
+   then the change's binary with `pr-1`, then `main-2`, `pr-2`, `main-3`, `pr-3`. One directory
+   serves both sides: the labels keep them apart.
+3. Render the table for the pull request's Numbers section:
+   `python3 crates/symphony/scripts/throughput_row.py --filter slice/thought_call/tokens main=<baselines dir> pr=<baselines dir>`
+   prints, per bench, the median of the repeats with their spread and the change against `main`.
+   A label is a name of your own (`main`, `pr`): `base`, `new` and `change` are criterion's and
+   are refused.
+
+The filter names the question: `slice/<family>/tokens` for the streaming cost per token,
+`slice/<family>/chars` for the per-delta floor, `slice/<family>/whole` for an output read at once,
+`setup/` for the per-request fixed cost, `adapt/` for the adapters and `prose/` for text with no
+marker in it. A slice row is the reading alone, the engine built outside the timing; the
+per-request setup is `setup/engine`'s row. A row measured on a loaded machine is provisional and
+says so; a regression in a row is a regression, reverted before it is explained.
 
 `fuzz/` holds coverage-guided fuzz targets for the engine over every table (cargo-fuzz on a
 nightly toolchain, a workspace of its own): the fuzzer's bytes, cut into deltas it also chooses,
