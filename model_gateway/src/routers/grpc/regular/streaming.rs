@@ -688,7 +688,7 @@ impl StreamingProcessor {
                             &mut sse_buffer,
                             &chunk_frame,
                             index,
-                            &events,
+                            events,
                             choice_logprobs,
                             usage.as_ref(),
                             emit_usage_null,
@@ -817,7 +817,7 @@ impl StreamingProcessor {
                             &mut sse_buffer,
                             &chunk_frame,
                             index,
-                            &events,
+                            events,
                             None,
                             usage.as_ref(),
                             emit_usage_null,
@@ -881,7 +881,7 @@ impl StreamingProcessor {
                             &mut sse_buffer,
                             &chunk_frame,
                             index,
-                            &events,
+                            events,
                             None,
                             usage.as_ref(),
                             emit_usage_null,
@@ -2188,13 +2188,13 @@ impl StreamingProcessor {
         buffer: &mut BytesMut,
         frame: &ChatChunkFrame,
         index: u32,
-        events: &[Event],
+        events: Vec<Event>,
         mut logprobs: Option<ChatLogProbs>,
         usage: Option<&Usage>,
         emit_usage_null: bool,
     ) -> Result<(), String> {
         for event in events {
-            let Some(mut choice) = adapt::chat::delta(index, event) else {
+            let Some(mut choice) = adapt::chat::into_delta(index, event) else {
                 continue;
             };
             if choice.finish_reason.is_some() {
