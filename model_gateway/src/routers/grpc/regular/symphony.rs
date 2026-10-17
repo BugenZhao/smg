@@ -56,7 +56,7 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use symphony::{
-    formats::{for_model, table_for, Table},
+    formats::{for_model_shared, table_for, Table},
     grammar::{GrammarStart, Options},
     Declared, Engine, EngineFinish, Event, Events, Format, Grammar, Input, OutputAnswer,
     OutputChoice, Parser as _, TokenSpan, Turn,
@@ -134,13 +134,14 @@ pub(crate) fn named_table(names: &Names) -> Option<Table> {
 /// channel; `passthrough` alone is the choice to leave the thought as written, which no table
 /// does. A tool-call name no table answers to leaves the response to the legacy parsers. What a
 /// request asks of the channels takes a variant of the table ([`assign`]). Preparation and
-/// request building both decide with this one predicate.
+/// request building both decide with this one predicate. The table comes shared, built once
+/// for every request and engine that reads with it; a variant is a copy.
 pub(crate) fn reads(
     parser: ParserChoice,
     names: &Names,
     model: &str,
     templates: &Templates,
-) -> Result<Option<Format>, String> {
+) -> Result<Option<Arc<Format>>, String> {
     if parser != ParserChoice::Symphony {
         return Ok(None);
     }
@@ -150,15 +151,15 @@ pub(crate) fn reads(
     let table = match named_table(names) {
         Some(table) => table,
         None if names.tool.is_none() && !is_passthrough(names.reasoning.as_deref()) => {
-            return Ok(for_model(model))
+            return Ok(for_model_shared(model))
         }
         None => return Ok(None),
     };
     // The registry's table comes with the model's own turn opener; a table named for a model
     // the registry reads with another, or does not know, replays from the table's own.
-    Ok(match for_model(model) {
+    Ok(match for_model_shared(model) {
         Some(format) if table_for(model) == Some(table) => Some(format),
-        _ => Some(table.format()),
+        _ => Some(table.shared()),
     })
 }
 
@@ -968,7 +969,8 @@ fn whole_turn(format: &Format, turn: &Turn<'_>) -> Result<Option<ToolConstraint>
 /// ([`assign`]), and the part of the rendered prompt the engine replays.
 #[derive(Clone, Debug)]
 pub(crate) struct Assignment {
-    pub format: Format,
+    /// The table, shared with every reader of the response and every request it reads for.
+    pub format: Arc<Format>,
     pub prompt: String,
 }
 
@@ -976,7 +978,7 @@ pub(crate) struct Assignment {
 /// made when the constraint is a JSON schema: the older path's forced call, whose output has no
 /// markers for a table to read, which the older registry writes where the table has no tag.
 fn assignment(
-    format: Option<Format>,
+    format: Option<Arc<Format>>,
     model: &str,
     constraint: Option<&(String, String)>,
     prompt: &str,
@@ -994,18 +996,20 @@ fn assignment(
 /// tool parser (the request asks for none, or its response is not scanned for calls:
 /// [`scans_for_tool_calls`]), so a table that reads calls from the output's first byte (`json`,
 /// `xlam`) is content from it; without its thought when the request keeps the reasoning in the
-/// content, as the legacy path runs no reasoning parser then.
-fn asked(format: Format, no_calls: bool, no_reasoning: bool) -> Format {
-    let format = if no_calls {
-        format.without_calls()
-    } else {
-        format
-    };
-    if no_reasoning {
-        format.without_reasoning()
-    } else {
-        format
+/// content, as the legacy path runs no reasoning parser then. A variant is a copy of the shared
+/// table; a request that asks for neither reads with the shared table itself.
+fn asked(format: Arc<Format>, no_calls: bool, no_reasoning: bool) -> Arc<Format> {
+    if !no_calls && !no_reasoning {
+        return format;
     }
+    let mut format = Arc::unwrap_or_clone(format);
+    if no_calls {
+        format = format.without_calls();
+    }
+    if no_reasoning {
+        format = format.without_reasoning();
+    }
+    Arc::new(format)
 }
 
 /// Symphony's assignment to a chat `request`, if a table reads the response ([`reads`]) and the
@@ -1147,7 +1151,7 @@ impl Reader {
     /// as its response spec holds them: every choice's reader shares them, none copies a schema.
     pub(crate) fn new(assignment: &Assignment, tools: Arc<[Tool]>) -> Result<Self, String> {
         let mut reader = Self {
-            engine: Engine::new(assignment.format.clone(), Declared::shared(tools)),
+            engine: Engine::shared(Arc::clone(&assignment.format), Declared::shared(tools)),
             events: Events::new(),
             last_token: None,
             ends: Vec::new(),
@@ -2045,7 +2049,10 @@ mod tests {
         let kept = request(
             json!({"tools": declared, "tool_choice": "required", "separate_reasoning": false}),
         );
-        assert_eq!(assigned(&kept), table(&kept).without_reasoning());
+        assert_eq!(
+            *assigned(&kept),
+            Arc::unwrap_or_clone(table(&kept)).without_reasoning()
+        );
         assert!(constraint(
             ParserChoice::Symphony,
             &Names::default(),
@@ -2055,7 +2062,10 @@ mod tests {
         )
         .is_some());
         let no_calls = request(json!({"tool_choice": "none"}));
-        assert_eq!(assigned(&no_calls), table(&no_calls).without_calls());
+        assert_eq!(
+            *assigned(&no_calls),
+            Arc::unwrap_or_clone(table(&no_calls)).without_calls()
+        );
         assert!(constraint(
             ParserChoice::Symphony,
             &Names::default(),
@@ -2066,8 +2076,10 @@ mod tests {
         .is_none());
         let neither = request(json!({"separate_reasoning": false}));
         assert_eq!(
-            assigned(&neither),
-            table(&neither).without_calls().without_reasoning()
+            *assigned(&neither),
+            Arc::unwrap_or_clone(table(&neither))
+                .without_calls()
+                .without_reasoning()
         );
         let both = request(json!({"tools": declared}));
         assert_eq!(assigned(&both), table(&both));
@@ -2126,7 +2138,10 @@ mod tests {
         let refused = request(json!({
             "model": "MiniMax-M3", "messages": retry_messages(), "tool_choice": "none"
         }));
-        assert_eq!(assigned(&refused), table(&refused).without_calls());
+        assert_eq!(
+            *assigned(&refused),
+            Arc::unwrap_or_clone(table(&refused)).without_calls()
+        );
         let declared_none = request(json!({"tools": []}));
         assert!(scans_for_tool_calls(&declared_none));
         assert_eq!(
@@ -2137,8 +2152,8 @@ mod tests {
         let undeclared = request(json!({"messages": retry_messages()}));
         assert!(!scans_for_tool_calls(&undeclared));
         assert_eq!(
-            assigned(&undeclared),
-            table(&undeclared).without_calls(),
+            *assigned(&undeclared),
+            Arc::unwrap_or_clone(table(&undeclared)).without_calls(),
             "a provider that reads calls only with tools"
         );
         // A Messages request: declared tools, an empty list included, keep the calls; none
@@ -2747,7 +2762,7 @@ mod tests {
     #[test]
     fn a_reader_ends_once() {
         let assignment = Assignment {
-            format: qwen3(CallSyntax::Json),
+            format: Arc::new(qwen3(CallSyntax::Json)),
             prompt: String::new(),
         };
         let mut reader = Reader::new(&assignment, Arc::default()).expect("a reader");
@@ -2808,10 +2823,8 @@ mod tests {
             .expect("read")
             .expect("assigned");
         assert_eq!(
-            assigned.format,
-            read(&hf, &kept)
-                .expect("read")
-                .expect("a table")
+            *assigned.format,
+            Arc::unwrap_or_clone(read(&hf, &kept).expect("read").expect("a table"))
                 .without_calls()
                 .without_reasoning()
         );
@@ -3052,7 +3065,7 @@ mod tests {
 
     fn read_with(format: Format) -> Vec<Event> {
         let assignment = Assignment {
-            format,
+            format: Arc::new(format),
             prompt: "<|im_start|>assistant\n".to_string(),
         };
         let mut reader = Reader::new(&assignment, tools().into()).expect("a reader");
@@ -3068,7 +3081,7 @@ mod tests {
         const TWO_CALLS: &str = "<tool_call>\n{\"name\": \"lookup\", \"arguments\": {\"q\": 1}}\n</tool_call>\
                                  <tool_call>\n{\"name\": \"lookup\", \"arguments\": {\"q\": 2}}\n</tool_call>";
         let assignment = Assignment {
-            format: qwen3(CallSyntax::Json),
+            format: Arc::new(qwen3(CallSyntax::Json)),
             prompt: "<|im_start|>assistant\n".to_string(),
         };
         let calls = |first_only: bool| {
@@ -3103,7 +3116,7 @@ mod tests {
     #[test]
     fn a_bare_answer_the_json_table_reads_as_a_call_comes_back_as_its_text() {
         let assignment = Assignment {
-            format: symphony::formats::json().without_calls(),
+            format: Arc::new(symphony::formats::json().without_calls()),
             prompt: String::new(),
         };
         let mut reader = Reader::new(&assignment, Arc::default()).expect("a reader");
