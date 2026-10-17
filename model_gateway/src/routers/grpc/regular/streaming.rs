@@ -51,7 +51,9 @@ use crate::{
                 response_formatting::{
                     chat_usage, effective_weight_version, CompletionTokenTracker, TokenCounts,
                 },
-                responses::{build_sse_response, build_sse_response_from_stream},
+                responses::{
+                    body_guards, build_sse_response_from_stream, build_sse_response_guarded,
+                },
             },
             context,
             proto_wrapper::{
@@ -66,7 +68,7 @@ use crate::{
             utils::message_utils,
         },
     },
-    worker::PrefillLoadGuard,
+    worker::{GuardedStream, PrefillLoadGuard},
 };
 
 /// One backend stream of a `/v1/completions` request. Batched requests fan
@@ -215,8 +217,9 @@ impl StreamingProcessor {
     /// - Background task spawning
     /// - SSE response building
     ///
-    /// Note: Caller should attach load guards to the returned response using
-    /// `WorkerLoadGuard::attach_to_response()` for proper RAII lifecycle management.
+    /// The `load_guards` (and the reservation's safety net) ride in the
+    /// response body, released when it is dropped: at the stream's end or
+    /// the client's disconnect.
     #[expect(clippy::too_many_arguments)]
     pub async fn process_streaming_response(
         self: Arc<Self>,
@@ -226,9 +229,11 @@ impl StreamingProcessor {
         tokenizer: Arc<dyn Tokenizer>,
         skip_special_tokens: bool,
         reservation: Option<Arc<SharedReservationHandle>>,
+        load_guards: Option<context::LoadGuards>,
         source: utils::StreamSource,
     ) -> Response {
         let source = source.with_backend(self.backend_type);
+        let guards = body_guards(load_guards, reservation.as_ref());
         use bytes::Bytes;
 
         let stop_params = (
@@ -335,14 +340,15 @@ impl StreamingProcessor {
             }
         }
 
-        // Return SSE response
+        // Return SSE response; its body holds the guards for as long as it lives.
+        let stream = GuardedStream::new(ReceiverStream::new(rx), guards);
         if rechunk {
             build_sse_response_from_stream(sse_rechunk::rechunk_stream(
-                ReceiverStream::new(rx),
+                stream,
                 sse_rechunk::NoopObserver,
             ))
         } else {
-            build_sse_response(rx)
+            build_sse_response_from_stream(stream)
         }
     }
 
@@ -468,8 +474,10 @@ impl StreamingProcessor {
     ///
     /// Simpler than chat - no tool/reasoning parsing, just text accumulation
     ///
-    /// Note: Caller should attach load guards to the returned response using
-    /// `WorkerLoadGuard::attach_to_response()` for proper RAII lifecycle management.
+    /// The `load_guards` (and the reservation's safety net) ride in the
+    /// response body, released when it is dropped: at the stream's end or
+    /// the client's disconnect.
+    #[expect(clippy::too_many_arguments)]
     pub async fn process_streaming_generate(
         self: Arc<Self>,
         execution_result: context::ExecutionResult,
@@ -477,9 +485,11 @@ impl StreamingProcessor {
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         reservation: Option<Arc<SharedReservationHandle>>,
+        load_guards: Option<context::LoadGuards>,
         source: utils::StreamSource,
     ) -> Response {
         let source = source.with_backend(self.backend_type);
+        let guards = body_guards(load_guards, reservation.as_ref());
         // Create SSE channel
         let (tx, rx) = sse_channel();
 
@@ -572,7 +582,7 @@ impl StreamingProcessor {
         }
 
         // Return SSE response
-        build_sse_response(rx)
+        build_sse_response_guarded(rx, guards)
     }
 
     /// Process streaming chunks for generate endpoint (no tool/reasoning parsing)
@@ -1592,7 +1602,9 @@ impl StreamingProcessor {
     /// Process streaming Messages API response and return SSE response.
     ///
     /// Parallel to [`Self::process_streaming_response`] for chat, but emits
-    /// Anthropic SSE format (`event: {type}\ndata: {json}\n\n`).
+    /// Anthropic SSE format (`event: {type}\ndata: {json}\n\n`). The
+    /// `load_guards` (and the reservation's safety net) ride in the response
+    /// body, released when it is dropped.
     #[expect(clippy::too_many_arguments)]
     pub async fn process_messages_streaming_response(
         self: Arc<Self>,
@@ -1602,9 +1614,11 @@ impl StreamingProcessor {
         tokenizer: Arc<dyn Tokenizer>,
         skip_special_tokens: bool,
         reservation: Option<Arc<SharedReservationHandle>>,
+        load_guards: Option<context::LoadGuards>,
         source: utils::StreamSource,
     ) -> Response {
         let source = source.with_backend(self.backend_type);
+        let guards = body_guards(load_guards, reservation.as_ref());
         // The stream's decoder takes the spec's stop sequences; nothing reads
         // them from the spec after this.
         let stop_params = (
@@ -1717,7 +1731,7 @@ impl StreamingProcessor {
             }
         }
 
-        build_sse_response(rx)
+        build_sse_response_guarded(rx, guards)
     }
 
     /// Process Messages API streaming chunks from a single stream.
@@ -2697,7 +2711,9 @@ impl StreamingProcessor {
     /// Batched requests fan out into one stream unit per prompt; all units
     /// write typed SSE events (with prompt-major index offsets) into one
     /// channel, and the coordinator emits the single aggregated usage chunk,
-    /// metrics record, and `[DONE]`.
+    /// metrics record, and `[DONE]`. The `load_guards` (and the reservation's
+    /// safety net) ride in the response body, released when it is dropped.
+    #[expect(clippy::too_many_arguments)]
     pub async fn process_completion_streaming_response(
         self: Arc<Self>,
         execution_result: context::ExecutionResult,
@@ -2705,9 +2721,11 @@ impl StreamingProcessor {
         dispatch: context::DispatchMetadata,
         tokenizer: Arc<dyn Tokenizer>,
         reservation: Option<Arc<SharedReservationHandle>>,
+        load_guards: Option<context::LoadGuards>,
         source: utils::StreamSource,
     ) -> Response {
         let source = source.with_backend(self.backend_type);
+        let guards = body_guards(load_guards, reservation.as_ref());
         let (tx, rx) = sse_channel();
 
         let units = match Self::completion_stream_units(execution_result) {
@@ -2715,7 +2733,7 @@ impl StreamingProcessor {
             Err(message) => {
                 utils::send_error_sse(&tx, message, "invalid_request_error").await;
                 let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
-                return build_sse_response(rx);
+                return build_sse_response_guarded(rx, guards);
             }
         };
 
@@ -2892,7 +2910,7 @@ impl StreamingProcessor {
             let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
         });
 
-        build_sse_response(rx)
+        build_sse_response_guarded(rx, guards)
     }
 
     /// Split an execution result into per-prompt stream units, in prompt order.
