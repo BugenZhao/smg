@@ -34,6 +34,13 @@ from typing import Any
 
 from smg_grpc_servicer.hostport import host_port
 
+# The switch's flag and choices live with the plugins' registration (stdlib
+# only); re-exported here as this module's documented values.
+from smg_grpc_servicer.servicer_impl_flag import (  # noqa: F401
+    IMPLS,
+    SERVICER_IMPL_FLAG,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_DRAIN_SECS = 5.0
@@ -268,7 +275,6 @@ def configuration_exit(error: ServicerConfigError, log: logging.Logger = logger)
 # The servicer switch: which implementation serves this process
 # ---------------------------------------------------------------------------
 
-IMPLS = ("python", "rust")
 # Where the implementation choice came from, for the startup log line.
 SOURCE_FLAG = "flag"
 SOURCE_ENV = "env"
