@@ -224,7 +224,9 @@ What the table says beyond the others:
   state and the assembler decides at the first byte that is not whitespace; unlike `xlam`, a `{`
   there is one call alone (`json::list::Assembler::object_or_list`), whose object reads as a
   list's object does, `arguments`, `parameters` or `args` naming the arguments. What follows the
-  object is the template's wrapping: whitespace dropped, anything else malformed.
+  object reads as what follows a list's `]`: whitespace that ends the output is the template's
+  wrapping, dropped; text is malformed, with the whitespace before and between its words, since
+  a model that explains its JSON in a sentence wrote that sentence and the reference keeps it.
 - **Prose before the JSON is content, whole.** The gateway's older `json` parser searches the
   output for the first `{` or `[`; this table does not, as no other table scans for a marker.
 - **A forced call is the list.** `Format::grammar` writes the `xlam` list, as the older parser's
@@ -262,8 +264,9 @@ What the table says beyond the others:
   …]` as it reads xLAM's bare list: each object a call, the brackets and the commas the template's
   wrapping. Between markers prose has no place, so text where the list should be, a `[` that opens
   no list of calls included, is malformed where the bare list takes it for content; the engine
-  picks that form for a table with a row into the arguments state. After the `]`, whitespace is
-  dropped and other text malformed, as for the bare list.
+  picks that form for a table with a row into the arguments state. After the `]`, whitespace
+  before the closing marker is dropped; text is malformed with the whitespace before and between
+  its words, as for the bare list.
 - **The thought is the Super template's, and the model's own.** Llama-3.3-Nemotron-Super-49B-v1.5's
   template renders an assistant message's content from its `</think>` on, so the model writes
   `<think>…</think>` itself; `/no_think` in the system prompt makes the template close the thought
