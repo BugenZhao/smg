@@ -26,7 +26,12 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
 regex = "1.12"
+
+[[bench]]
+name = "throughput"
+harness = false
 
 [lints]
 workspace = true
