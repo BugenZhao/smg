@@ -857,13 +857,29 @@ impl PolicyRegistry {
     /// before it reads text. Hints are validated by the same extractors
     /// selection uses, so malformed or over-cap values lift nothing.
     pub fn any_policy_needs_request_text(&self, headers: Option<&HeaderMap>) -> bool {
+        self.any_policy_wants_text(headers, |policy| policy.needs_request_text())
+    }
+
+    /// [`Self::any_policy_needs_request_text`] for a request whose token ids
+    /// are available: a policy that routes on the ids and reads text only
+    /// without them ([`LoadBalancingPolicy::needs_request_text_with_tokens`])
+    /// does not count, so the ids go into the selection snapshot alone.
+    pub fn any_policy_needs_request_text_with_tokens(&self, headers: Option<&HeaderMap>) -> bool {
+        self.any_policy_wants_text(headers, |policy| policy.needs_request_text_with_tokens())
+    }
+
+    fn any_policy_wants_text(
+        &self,
+        headers: Option<&HeaderMap>,
+        wants: impl Fn(&dyn LoadBalancingPolicy) -> bool,
+    ) -> bool {
         if parse_routing_tokens_hint(headers).is_some() {
             return false;
         }
         let keyed_override =
             self.routing_key_sticky.is_some() && self.resolve_routing_key(headers).is_some();
         let needs_text = |policy: &Arc<dyn LoadBalancingPolicy>| {
-            policy.needs_request_text()
+            wants(policy.as_ref())
                 && !(keyed_override && Self::routing_key_override_applies(policy.name()))
         };
         needs_text(&self.default_policy)
@@ -1370,6 +1386,61 @@ mod tests {
         assert!(reg.any_policy_needs_request_text(None));
         assert!(!reg.any_policy_needs_request_text(Some(&headers_with_tokens("1,2,3"))));
         assert!(!reg.any_policy_needs_request_text(Some(&headers_with_key("session-A"))));
+    }
+
+    /// A policy that reads the text beside the ids; none of the built-in
+    /// ones does, so the trait's default is what such a policy gets.
+    #[derive(Debug)]
+    struct TextBesideIds;
+
+    impl LoadBalancingPolicy for TextBesideIds {
+        fn select_worker(
+            &self,
+            workers: &[Arc<dyn Worker>],
+            _info: &SelectWorkerInfo,
+        ) -> Option<usize> {
+            (!workers.is_empty()).then_some(0)
+        }
+
+        fn name(&self) -> &'static str {
+            "text_beside_ids"
+        }
+
+        fn needs_request_text(&self) -> bool {
+            true
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Beside token ids the text is wanted only by a policy that reads it
+    /// there: `cache_aware` and `bucket` route on the ids and answer no, as
+    /// the default and as a per-model policy, with the same hint rules; a
+    /// policy that says nothing about the ids keeps its text answer.
+    #[test]
+    fn text_beside_token_ids_is_wanted_only_by_a_policy_that_reads_it_there() {
+        let reg = PolicyRegistry::new(cache_aware_config());
+        assert!(reg.any_policy_needs_request_text(None));
+        assert!(!reg.any_policy_needs_request_text_with_tokens(None));
+        assert!(!reg.any_policy_needs_request_text_with_tokens(Some(&headers_with_tokens("1,2,3"))));
+        for policy in ["cache_aware", "bucket"] {
+            let reg = PolicyRegistry::with_override(PolicyConfig::RoundRobin, enabled_override());
+            reg.on_worker_added("llama-3", Some(policy));
+            assert!(reg.any_policy_needs_request_text(None), "{policy}");
+            assert!(
+                !reg.any_policy_needs_request_text_with_tokens(None),
+                "{policy}"
+            );
+        }
+        // A per-model policy that reads text beside the ids makes the
+        // registry ask for it, under the same hint rule.
+        let reg = PolicyRegistry::new(PolicyConfig::RoundRobin);
+        reg.model_policies
+            .insert("llama-text".to_string(), Arc::new(TextBesideIds));
+        assert!(reg.any_policy_needs_request_text_with_tokens(None));
+        assert!(!reg.any_policy_needs_request_text_with_tokens(Some(&headers_with_tokens("1,2,3"))));
     }
 
     #[test]
