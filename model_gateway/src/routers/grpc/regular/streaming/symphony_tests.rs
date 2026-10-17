@@ -462,6 +462,7 @@ fn assigned_message(format: Format, prompt: &str, thinking: bool) -> MessagesRes
     MessagesResponseSpec {
         first_tool_call_only: false,
         thinking_requested: thinking,
+        thinking_text_returned: true,
         reasoning_in_prefill: false,
         tool_choice: None,
         has_tools: true,
@@ -475,7 +476,7 @@ fn assigned_message(format: Format, prompt: &str, thinking: bool) -> MessagesRes
     }
 }
 
-async fn message_events(
+pub(super) async fn message_events(
     responses: Vec<proto::GenerateResponse>,
     spec: MessagesResponseSpec,
     stop: Option<&str>,
@@ -502,7 +503,7 @@ async fn message_events(
 
 /// The content blocks of a streamed message as `(type, text or name, input JSON)`, rebuilt from
 /// the deltas: blocks must open and close one at a time, with indices in order.
-fn message_blocks(events: &[Value]) -> Vec<(String, String, Value)> {
+pub(super) fn message_blocks(events: &[Value]) -> Vec<(String, String, Value)> {
     let mut blocks: Vec<(String, String, String)> = Vec::new();
     let mut open: Option<u64> = None;
     for event in events {
