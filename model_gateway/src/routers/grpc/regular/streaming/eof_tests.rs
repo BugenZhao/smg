@@ -1127,7 +1127,7 @@ async fn byte_fallback_unary_valid_reasoning_counts_original_tokens() {
             response: Some(GenerationEvent::Complete(complete)),
         };
         let (stream, server) = scripted_stream(vec![frame], "0").await;
-        let message = processor
+        let (message, _) = processor
             .process_non_streaming_messages_response(
                 context::ExecutionResult::Single { stream },
                 byte_fallback_messages_spec(true),
@@ -1636,7 +1636,7 @@ async fn kimi_k3_cut_inside_the_closing_structure_keeps_the_markers_out_of_conte
         let (stream, server) = scripted_stream(vec![chunk(0, &text), last], "0").await;
         let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharacterTokenizer::default());
         let mut decoder = utils::create_stop_decoder(&tokenizer, None, None, false, false, false);
-        let response = ResponseProcessor::new(
+        let (response, _) = ResponseProcessor::new(
             ToolParserFactory::new(),
             ReasoningParserFactory::new(),
             resolver(),
@@ -1735,7 +1735,7 @@ async fn chat_unary_logprobs_cover_the_content_only() {
     let stop = Some(StringOrArray::String("STOP".to_string()));
     let mut decoder =
         utils::create_stop_decoder(&tokenizer, stop.as_ref(), None, false, false, false);
-    let response = ResponseProcessor::new(
+    let (response, _) = ResponseProcessor::new(
         ToolParserFactory::new(),
         ReasoningParserFactory::new(),
         utils::ParserResolver::new(
@@ -2102,7 +2102,7 @@ async fn qwen_xml_messages(text: &str, finish: &str, stream: bool) -> (Vec<Strin
             resolver(),
         );
         let mut decoder = utils::create_stop_decoder(&tokenizer, None, None, false, false, false);
-        let message = processor
+        let (message, _) = processor
             .process_non_streaming_messages_response(
                 context::ExecutionResult::Single {
                     stream: grpc_stream,
@@ -2753,7 +2753,7 @@ async fn gemma4_rendered_prompt_state_controls_chat_responses() {
                 } else {
                     let mut decoder =
                         utils::create_stop_decoder(&tokenizer, None, None, false, false, false);
-                    let response = ResponseProcessor::new(
+                    let (response, _) = ResponseProcessor::new(
                         ToolParserFactory::new(),
                         ReasoningParserFactory::new(),
                         resolver,
@@ -2890,7 +2890,7 @@ async fn gemma4_rendered_prompt_state_controls_messages_responses() {
                 } else {
                     let mut decoder =
                         utils::create_stop_decoder(&tokenizer, None, None, false, false, false);
-                    let response = ResponseProcessor::new(
+                    let (response, _) = ResponseProcessor::new(
                         ToolParserFactory::new(),
                         ReasoningParserFactory::new(),
                         resolver,
@@ -3058,7 +3058,8 @@ plan<|tool_call>call:lookup{q:<|"|>Paris<|"|>}<tool_call|>"#;
                 tokenizer,
                 &mut decoder,
             )
-            .await;
+            .await
+            .map(|(message, _)| message);
         server.abort();
         let response =
             serde_json::to_value(result.unwrap_or_else(|error| panic!("{}", error.status())))
@@ -3601,7 +3602,7 @@ async fn messages_tool_inputs(tool_choice: &Value, texts: &[&str], stream: bool)
             qwen_resolver(),
         );
         let mut decoder = utils::create_stop_decoder(&tokenizer, None, None, false, false, false);
-        let message = processor
+        let (message, _) = processor
             .process_non_streaming_messages_response(
                 context::ExecutionResult::Single {
                     stream: grpc_stream,
