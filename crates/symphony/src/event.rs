@@ -1,5 +1,7 @@
 //! Typed events. Every byte of model output appears in exactly one event.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 /// A run of text and, when the parser saw token ids, the number of engine tokens it came from.
@@ -82,8 +84,9 @@ pub enum MalformedReason {
     InvalidArguments,
     /// A tool call named a function the request did not declare.
     UnknownTool,
-    /// Anything else, described.
-    Other(String),
+    /// Anything else, described. The crate's own reasons are fixed texts and borrow; a reason
+    /// built for the occasion is owned. On the wire both are the string, as before.
+    Other(Cow<'static, str>),
 }
 
 /// The finish reason the parser reports after refining the engine's.
@@ -374,6 +377,28 @@ mod tests {
         let other = serde_json::to_string(&FinishReason::Other("content_filter".into()))
             .expect("serializes");
         assert_eq!(other, r#"{"other":"content_filter"}"#);
+    }
+
+    /// A malformed region's reason is one string on the wire, whether the crate borrowed a fixed
+    /// text or built one; what is read back equals what was written.
+    #[test]
+    fn a_malformed_reason_is_its_text_on_the_wire_borrowed_or_owned() {
+        let malformed = Event::Malformed {
+            text: Text::uncounted("x"),
+            why: MalformedReason::Other("text between a call's tags".into()),
+        };
+        let json = serde_json::to_string(&malformed).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"kind":"malformed","text":{"text":"x","tokens":null},"why":{"other":"text between a call's tags"}}"#
+        );
+        let back: Event = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, malformed, "read back owned, equal by its text");
+        let owned = MalformedReason::Other(String::from("built for the occasion").into());
+        assert_eq!(
+            serde_json::to_string(&owned).expect("serializes"),
+            r#"{"other":"built for the occasion"}"#
+        );
     }
 
     #[test]
