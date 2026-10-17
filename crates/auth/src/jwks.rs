@@ -197,8 +197,12 @@ pub(crate) fn validate_url(url_str: &str) -> Result<Url, JwksError> {
 #[derive(Debug, serde::Deserialize)]
 struct OidcDiscovery {
     jwks_uri: String,
-    #[expect(dead_code)]
-    issuer: String,
+    /// Required of the document (OIDC Discovery 1.0 lists it as such), so a
+    /// document without it is refused at the parse as before; its value is
+    /// read nowhere yet. Checking it against the configured issuer is a
+    /// separate change.
+    #[serde(rename = "issuer")]
+    _issuer: String,
 }
 
 /// Cached JWKS with expiration tracking.
@@ -332,12 +336,6 @@ impl JwksProvider {
         })
     }
 
-    /// Get the JWKS URI.
-    #[expect(dead_code)]
-    pub fn jwks_uri(&self) -> &str {
-        &self.jwks_uri
-    }
-
     /// Fetch JWKS from the endpoint.
     /// Response size is limited to prevent DoS attacks.
     async fn fetch_jwks(&self) -> Result<JwkSet, JwksError> {
@@ -459,19 +457,6 @@ impl JwksProvider {
         }
         *last_attempt = Some(Instant::now());
         true
-    }
-
-    /// Force refresh the JWKS cache.
-    #[expect(dead_code)]
-    pub async fn refresh(&self) -> Result<(), JwksError> {
-        let jwks = self.fetch_jwks().await?;
-        let mut cache = self.cache.write();
-        *cache = Some(CachedJwks {
-            jwks,
-            fetched_at: Instant::now(),
-            ttl: self.ttl,
-        });
-        Ok(())
     }
 }
 
