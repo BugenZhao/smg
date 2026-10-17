@@ -47,6 +47,7 @@ use tokio::{signal, spawn};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
 
+pub mod connection_limit;
 pub mod connection_timeouts;
 
 use crate::{
@@ -71,7 +72,10 @@ use crate::{
         http::router::{stream_eligible_request_bodies, StreamBodyState},
         RouterTrait,
     },
-    server::connection_timeouts::{ConnectionTimeoutAcceptor, ConnectionTimeouts},
+    server::{
+        connection_limit::ConnectionLimitAcceptor,
+        connection_timeouts::{ConnectionTimeoutAcceptor, ConnectionTimeouts},
+    },
     service_discovery::{start_service_discovery, RuntimeDiscoveryConfig},
     tenant,
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -2254,10 +2258,37 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         idle_connection_timeout_secs = config.router_config.idle_connection_timeout_secs,
         "HTTP connection timeouts (0 = disabled)"
     );
+    // The bound on the connections open at once (see [`connection_limit`]):
+    // a connection beyond it is closed at accept, unanswered. 0 is no bound.
+    let max_connections = config.router_config.max_connections;
+    info!(
+        max_connections,
+        "HTTP connection limit on the data listener (0 = unlimited; the admin and probe listeners \
+         are outside it)"
+    );
+    // The admission limit the bound is compared with is the effective one
+    // (the one resolution of `max_concurrent_requests`, shared with the
+    // admission bucket).
+    let admission_limit = crate::app_context::effective_max_concurrent_requests(
+        config.router_config.max_concurrent_requests,
+    );
+    if let Some(admission_limit) =
+        admission_limit.filter(|limit| max_connections > 0 && max_connections < *limit)
+    {
+        warn!(
+            max_connections,
+            admission_limit,
+            "The connection limit is below the admission limit: clients on HTTP/1, one request \
+             per connection, are refused at the listener (a closed connection, no response) \
+             before admission can queue or answer them"
+        );
+    }
 
     // The admin listener serves the control plane with the data listener's
-    // TLS material and connection timeouts, and drains with it (the shutdown
-    // above closes both handles together).
+    // TLS material and connection timeouts, but outside its connection limit
+    // (`--max-connections`), so the control plane and the probes it serves
+    // stay reachable while the data plane is saturated; it drains with it
+    // (the shutdown above closes both handles together).
     let admin_serving: Serving = match (admin_listener, admin_app) {
         (Some(admin_listener), Some(admin_app)) => {
             let admin_addr = admin_listener.local_addr()?;
@@ -2289,14 +2320,22 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
         Box::pin(
             axum_server::from_tcp_rustls(listener, tls_config)?
-                .map(|acceptor| tls_acceptor(acceptor, connection_timeouts))
+                .map(|acceptor| {
+                    ConnectionLimitAcceptor::new(
+                        tls_acceptor(acceptor, connection_timeouts),
+                        max_connections,
+                    )
+                })
                 .handle(handle)
                 .serve(app),
         )
     } else {
         Box::pin(
             axum_server::from_tcp(listener)?
-                .acceptor(http_acceptor(connection_timeouts))
+                .acceptor(ConnectionLimitAcceptor::new(
+                    http_acceptor(connection_timeouts),
+                    max_connections,
+                ))
                 .handle(handle)
                 .serve(app),
         )
