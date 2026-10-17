@@ -24,11 +24,10 @@ use crate::{
     config::types::{ManualAssignmentMode, PdPairingMode, PolicyConfig, RoutingKeyOverrideConfig},
     mesh::adapters::TreeSyncAdapter,
     observability::{cache_trace, metrics::Metrics},
-    policies::cache_aware::LoadReceiver,
     routers::common::header_utils::{
         extract_routing_key_hint_named, parse_routing_tokens_hint, ROUTING_KEY_HINT_MAX_BYTES,
     },
-    worker::{KvEventMonitor, RequestCompletionSink, Worker, WorkerType},
+    worker::{load_state::LoadReceiver, KvEventMonitor, RequestCompletionSink, Worker, WorkerType},
 };
 
 /// Routes a request completion to the policy that placed the request: the
@@ -450,32 +449,43 @@ impl PolicyRegistry {
         }
     }
 
-    /// Set the backend load-snapshot receiver (thread-safe, can be called after
-    /// initialization). Propagates to all existing cache-aware policies.
+    /// Hand every policy the worker monitor's load feed (thread-safe, can be
+    /// called after initialization); a policy created later takes it from
+    /// the registry (see [`Self::publish_with_shared_state`]).
     pub(crate) fn set_load_receiver(&self, rx: Option<LoadReceiver>) {
         {
             let mut guard = self.load_rx.write();
             guard.clone_from(&rx);
         }
-        Self::maybe_inject_load_rx(&self.default_policy, rx.as_ref());
-        if let Some(p) = self.prefill_policy.get() {
-            Self::maybe_inject_load_rx(p, rx.as_ref());
-        }
-        if let Some(p) = self.decode_policy.get() {
-            Self::maybe_inject_load_rx(p, rx.as_ref());
-        }
-        if let Some(p) = self.encode_policy.get() {
-            Self::maybe_inject_load_rx(p, rx.as_ref());
-        }
-        for entry in self.model_policies.iter() {
-            Self::maybe_inject_load_rx(entry.value(), rx.as_ref());
-        }
+        self.each_policy(|policy| policy.set_load_receiver(rx.clone()));
     }
 
-    /// Inject the load receiver into a policy if it's cache-aware.
-    fn maybe_inject_load_rx(policy: &Arc<dyn LoadBalancingPolicy>, rx: Option<&LoadReceiver>) {
-        if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
-            cache_aware.set_load_receiver(rx.cloned());
+    /// Visit every policy the registry holds once: the default, the PD and
+    /// EPD legs, then the per-model policies. A policy shared between slots
+    /// (a model with no hint takes the default) is visited for the first
+    /// slot it stands in only, so a visit that does work, a worker's
+    /// removal, is not repeated per model.
+    fn each_policy(&self, mut visit: impl FnMut(&Arc<dyn LoadBalancingPolicy>)) {
+        let mut seen: Vec<*const ()> = Vec::new();
+        let mut once = |policy: &Arc<dyn LoadBalancingPolicy>| {
+            let ptr = Arc::as_ptr(policy) as *const ();
+            if !seen.contains(&ptr) {
+                seen.push(ptr);
+                visit(policy);
+            }
+        };
+        once(&self.default_policy);
+        for leg in [
+            &self.prefill_policy,
+            &self.decode_policy,
+            &self.encode_policy,
+        ] {
+            if let Some(policy) = leg.get() {
+                once(policy);
+            }
+        }
+        for entry in self.model_policies.iter() {
+            once(entry.value());
         }
     }
 
@@ -605,7 +615,7 @@ impl PolicyRegistry {
         let load_rx = self.load_rx.read();
         let mesh = self.mesh_tree_sync.read();
         Self::maybe_inject_monitor(policy, monitor.as_ref());
-        Self::maybe_inject_load_rx(policy, load_rx.as_ref());
+        policy.set_load_receiver(load_rx.as_ref().cloned());
         Self::maybe_inject_mesh_tree_sync(policy, mesh.as_ref());
         publish();
     }
@@ -889,60 +899,13 @@ impl PolicyRegistry {
                 .any(|entry| needs_text(entry.value()))
     }
 
-    /// Get all load-aware policies that need periodic load updates (lock-free).
-    ///
-    /// Membership is policy-reported via
-    /// [`LoadBalancingPolicy::needs_backend_loads`]: `power_of_two` and
-    /// `least_load` always consume load reports; `cache_aware` does when its
-    /// pressure knobs are configured.
-    pub fn get_all_load_aware_policies(&self) -> Vec<Arc<dyn LoadBalancingPolicy>> {
-        let mut policies = Vec::new();
-
-        if self.default_policy.needs_backend_loads() {
-            policies.push(Arc::clone(&self.default_policy));
-        }
-
-        // Get prefill, decode, and encode policies (lock-free via OnceLock::get)
-        let prefill_policy_opt = self.prefill_policy.get();
-        let decode_policy_opt = self.decode_policy.get();
-        let encode_policy_opt = self.encode_policy.get();
-
-        if let Some(policy) = prefill_policy_opt {
-            if policy.needs_backend_loads() && !Arc::ptr_eq(policy, &self.default_policy) {
-                policies.push(Arc::clone(policy));
-            }
-        }
-
-        if let Some(policy) = decode_policy_opt {
-            if policy.needs_backend_loads()
-                && !Arc::ptr_eq(policy, &self.default_policy)
-                && !prefill_policy_opt.is_some_and(|p| Arc::ptr_eq(p, policy))
-            {
-                policies.push(Arc::clone(policy));
-            }
-        }
-
-        if let Some(policy) = encode_policy_opt {
-            if policy.needs_backend_loads()
-                && !Arc::ptr_eq(policy, &self.default_policy)
-                && !prefill_policy_opt.is_some_and(|p| Arc::ptr_eq(p, policy))
-                && !decode_policy_opt.is_some_and(|p| Arc::ptr_eq(p, policy))
-            {
-                policies.push(Arc::clone(policy));
-            }
-        }
-
-        for entry in self.model_policies.iter() {
-            let policy = entry.value();
-            if policy.needs_backend_loads() {
-                let already_added = policies.iter().any(|p| Arc::ptr_eq(p, policy));
-                if !already_added {
-                    policies.push(Arc::clone(policy));
-                }
-            }
-        }
-
-        policies
+    /// Whether any policy routes on backend load (see
+    /// [`LoadBalancingPolicy::needs_backend_loads`]): with load monitoring
+    /// off, the worker monitor still polls a group while this holds.
+    pub fn needs_backend_loads(&self) -> bool {
+        let mut needs = false;
+        self.each_policy(|policy| needs |= policy.needs_backend_loads());
+        needs
     }
 
     /// Initialize cache-aware policy with workers if applicable
@@ -1026,16 +989,12 @@ impl PolicyRegistry {
         }
     }
 
-    /// Drop a removed worker's cached load report from all load-aware
-    /// policies.
-    ///
-    /// Push-model policies cache per-worker load reports keyed by URL;
-    /// without this their caches would grow unbounded under worker churn.
-    /// Called on worker removal alongside the cache-aware cleanup above.
-    pub fn remove_worker_from_load_aware(&self, worker_url: &str) {
-        for policy in self.get_all_load_aware_policies() {
-            policy.remove_worker(worker_url);
-        }
+    /// Drop the state every policy keeps on a removed worker (a load-aware
+    /// policy's dispatch tally; see [`LoadBalancingPolicy::remove_worker`]),
+    /// which would otherwise grow without bound under worker churn. Called
+    /// on worker removal alongside the cache-aware cleanup above.
+    pub fn remove_worker_from_policies(&self, worker_url: &str) {
+        self.each_policy(|policy| policy.remove_worker(worker_url));
     }
 
     /// Initialize cache-aware policies for PD mode (prefill and decode) - lock-free
@@ -1109,7 +1068,7 @@ impl std::fmt::Debug for PolicyRegistry {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::worker::HealthCheckConfig;
+    use openai_protocol::worker::{HealthCheckConfig, SchedulerLoadSnapshot, WorkerLoadResponse};
     use tokio::sync::watch;
     use tracing_test::traced_test;
 
@@ -2188,6 +2147,27 @@ mod tests {
         assert_eq!(registry.get_worker_counts().get("llama-3"), None);
     }
 
+    /// A policy shared between slots is visited once: a model with no hint
+    /// takes the registry's default, so one worker's removal reaches that
+    /// policy once, however many models stand on it, not once per model.
+    #[test]
+    fn a_policy_shared_between_slots_is_visited_once() {
+        let registry = PolicyRegistry::new(PolicyConfig::RoundRobin);
+        for model in ["m1", "m2", "m3"] {
+            registry.on_worker_added(model, None);
+        }
+        registry.on_worker_added("hinted", Some("least_load"));
+        let mut visits: Vec<*const ()> = Vec::new();
+        registry.each_policy(|policy| visits.push(Arc::as_ptr(policy) as *const ()));
+        assert_eq!(
+            visits.len(),
+            2,
+            "the shared default once, the hinted policy once"
+        );
+        let default = Arc::as_ptr(&registry.default_policy) as *const ();
+        assert_eq!(visits.iter().filter(|p| **p == default).count(), 1);
+    }
+
     #[test]
     fn test_passthrough_is_not_load_aware() {
         // Passthrough must not be polled by the WorkerMonitor: with it as the
@@ -2195,7 +2175,51 @@ mod tests {
         // set stays empty.
         let registry = PolicyRegistry::new(PolicyConfig::Passthrough);
         registry.on_worker_added("m", Some("passthrough"));
-        assert!(registry.get_all_load_aware_policies().is_empty());
+        assert!(!registry.needs_backend_loads());
+    }
+
+    /// The load feed reaches every policy that scores on it, not only the
+    /// cache-aware ones: a power-of-two default routes on the snapshot the
+    /// registry handed it, and a model policy created afterwards takes the
+    /// feed from the registry.
+    #[test]
+    fn the_load_feed_reaches_every_policy_that_scores_on_it() {
+        fn report(queued_tokens: i32) -> WorkerLoadResponse {
+            WorkerLoadResponse {
+                loads: vec![SchedulerLoadSnapshot {
+                    num_waiting_uncached_tokens: queued_tokens,
+                    gen_throughput: 100.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        let registry = PolicyRegistry::new(PolicyConfig::PowerOfTwo {
+            load_check_interval_secs: 60,
+            load_metric: Default::default(),
+        });
+        let (_tx, rx) = watch::channel(LoadSnapshot::from_loads_for_test(vec![
+            ("http://a:8000".to_string(), report(100_000)),
+            ("http://b:8000".to_string(), report(0)),
+        ]));
+        registry.set_load_receiver(Some(rx));
+        let later = registry.on_worker_added("m", Some("least_load"));
+
+        let workers = vec![
+            worker("http://a:8000", WorkerType::Regular),
+            worker("http://b:8000", WorkerType::Regular),
+        ];
+        for policy in [registry.get_default_policy(), later] {
+            for _ in 0..20 {
+                assert_eq!(
+                    policy.select_worker(&workers, &SelectWorkerInfo::default()),
+                    Some(1),
+                    "{} did not route on the feed",
+                    policy.name()
+                );
+            }
+        }
     }
 
     #[test]
@@ -2227,7 +2251,7 @@ mod tests {
         // Even without pressure tuning, misses, spills, and equal-affinity
         // ties use LeastLoad's expected-wait snapshots.
         let plain = PolicyRegistry::new(cache_aware(0.0, 1.0, 1.0));
-        assert_eq!(plain.get_all_load_aware_policies().len(), 1);
+        assert!(plain.needs_backend_loads());
 
         // Pressure knobs do not change that load-aware membership.
         for pressured in [
@@ -2236,7 +2260,7 @@ mod tests {
             cache_aware(0.0, 1.0, 0.9),
         ] {
             let registry = PolicyRegistry::new(pressured);
-            assert_eq!(registry.get_all_load_aware_policies().len(), 1);
+            assert!(registry.needs_backend_loads());
         }
     }
 
