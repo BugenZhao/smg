@@ -150,19 +150,10 @@ impl TrtllmServiceClient {
             stop,
             stop_token_ids: vec![],
             ignore_eos: body.ignore_eos,
-            bad: vec![],
-            bad_token_ids: vec![],
             guided_decoding,
-            embedding_bias: vec![],
-            lora_config: None,
-            prompt_tuning_config: None,
             multimodal_input,
-            kv_cache_retention: None,
-            disaggregated_params: None,
-            lookahead_config: None,
-            cache_salt_id: None,
-            arrival_time: None,
             include_stop_token_in_output: false,
+            ..Default::default()
         };
 
         Ok(grpc_request)
@@ -227,19 +218,10 @@ impl TrtllmServiceClient {
             stop: plain.stop,
             stop_token_ids: plain.stop_token_ids,
             ignore_eos: plain.ignore_eos,
-            bad: vec![],
-            bad_token_ids: vec![],
             guided_decoding,
-            embedding_bias: vec![],
-            lora_config: None,
-            prompt_tuning_config: None,
             multimodal_input: None,
-            kv_cache_retention: None,
-            disaggregated_params: None,
-            lookahead_config: None,
-            cache_salt_id: None,
-            arrival_time: None,
             include_stop_token_in_output: false,
+            ..Default::default()
         };
 
         Ok(grpc_request)
@@ -287,19 +269,10 @@ impl TrtllmServiceClient {
             stop: vec![], // Does not pass through body.stop yet (follow-up fix)
             stop_token_ids: vec![],
             ignore_eos: false,
-            bad: vec![],
-            bad_token_ids: vec![],
             guided_decoding,
-            embedding_bias: vec![],
-            lora_config: None,
-            prompt_tuning_config: None,
             multimodal_input: None,
-            kv_cache_retention: None,
-            disaggregated_params: None,
-            lookahead_config: None,
-            cache_salt_id: None,
-            arrival_time: None,
             include_stop_token_in_output: false,
+            ..Default::default()
         };
 
         Ok(grpc_request)
@@ -497,19 +470,10 @@ impl TrtllmServiceClient {
             stop,
             stop_token_ids: vec![],
             ignore_eos: false,
-            bad: vec![],
-            bad_token_ids: vec![],
             guided_decoding,
-            embedding_bias: vec![],
-            lora_config: None,
-            prompt_tuning_config: None,
             multimodal_input,
-            kv_cache_retention: None,
-            disaggregated_params: None,
-            lookahead_config: None,
-            cache_salt_id: None,
-            arrival_time: None,
             include_stop_token_in_output: false,
+            ..Default::default()
         };
 
         Ok(grpc_request)
@@ -584,19 +548,10 @@ impl TrtllmServiceClient {
             stop,
             stop_token_ids: body.stop_token_ids.clone().unwrap_or_default(),
             ignore_eos: body.ignore_eos,
-            bad: vec![],
-            bad_token_ids: vec![],
             guided_decoding,
-            embedding_bias: vec![],
-            lora_config: None,
-            prompt_tuning_config: None,
             multimodal_input: None,
-            kv_cache_retention: None,
-            disaggregated_params: None,
-            lookahead_config: None,
-            cache_salt_id: None,
-            arrival_time: None,
             include_stop_token_in_output: body.no_stop_trim,
+            ..Default::default()
         };
 
         Ok(grpc_request)
