@@ -219,6 +219,10 @@ impl Router {
                 let mut request_builder = worker
                     .http_client()
                     .get(format!("{}/{endpoint}", worker.url()));
+                // A public route outside the auth middleware: the allow-listed
+                // caller headers go as they are and nothing is added (a
+                // configured worker key here would authenticate an anonymous
+                // caller as the worker).
                 for (name, value) in headers {
                     if header_utils::should_forward_request_header(&name) {
                         request_builder = request_builder.header(name, value);
