@@ -85,6 +85,9 @@ class Worker:
     # KV transfer backend for this PD worker ("nixl", "mooncake" or "moriio");
     # None takes the lane's default, so one fleet can mix transports.
     kv_backend: str | None = None
+    # In-engine RL control app port (TokenSpeed gRPC workers). None allocates
+    # one at launch; SMG discovers it from the engine's server info.
+    rl_control_port: int | None = None
     # Environment for the engine process on top of the infra's own settings
     # (a deployment-injected SMG_PAIRING_PROTOCOL, for instance).
     extra_env: dict[str, str] | None = None
@@ -274,6 +277,9 @@ class Worker:
         from .process_utils import release_port
 
         release_port(self.port)
+        if self.rl_control_port is not None:
+            release_port(self.rl_control_port)
+            self.rl_control_port = None
         if self.bootstrap_port is not None:
             release_port(self.bootstrap_port)
         if self.nixl_port is not None:
@@ -612,6 +618,14 @@ class Worker:
             # ``logprobs=True`` requests get real per-token data back.
             "--enable-output-logprobs",
         ]
+        # Only the port: without ``--rl-control-host`` the engine binds the
+        # control app on its own ``--host`` (the harness address the gateway
+        # already dials) and advertises that URL; a wildcard bind would not be
+        # advertised at all. ``ts serve`` always enables the control app, so
+        # every lane runs the engine as deployed.
+        if self.rl_control_port is None:
+            self.rl_control_port = get_open_port()
+        cmd.extend(["--rl-control-port", str(self.rl_control_port)])
         if self.worker_type in (WorkerType.ENCODE, WorkerType.PREFILL, WorkerType.DECODE):
             cmd.extend(["--disaggregation-mode", self.worker_type.value])
             if self.bootstrap_port is not None:
