@@ -1884,6 +1884,21 @@ mod tests {
         assert_eq!(named_table(&pair(Some("pythonic"), Some("qwen3"))), None);
         // The older `llama` parser's format is the json table's.
         assert_eq!(named_table(&pair(Some("llama"), None)), Some(Table::Json));
+        // The older DeepSeek pairings read with the tables, the thought included: the R1 line
+        // behind `deepseek` + `deepseek_r1` writes V3's calls after a thought, and the V3 table
+        // reads it, whether the prompt opens the thought (the original R1's tail, below) or the
+        // model writes `<think>` itself (R1-0528).
+        assert_eq!(
+            named_table(&pair(Some("deepseek"), Some("deepseek_r1"))),
+            Some(Table::DeepSeekV3)
+        );
+        assert!(Table::DeepSeekV3
+            .format()
+            .reasoning_open("<｜Assistant｜><think>\n"));
+        assert_eq!(
+            named_table(&pair(Some("deepseek31"), Some("deepseek_v31"))),
+            Some(Table::DeepSeekV3_1)
+        );
         // `passthrough` leaves a channel as written, which no table reads for: the legacy
         // parsers keep it, alone or beside another name.
         assert_eq!(
@@ -1973,6 +1988,9 @@ mod tests {
             ("minimax", "minimax_m2"),
             ("minimax_m2", "minimax_m2"),
             ("minimax_m3", "minimax_m3"),
+            ("deepseek", "deepseek_v3"),
+            ("deepseek31", "deepseek_v3.1"),
+            ("deepseek_v31", "deepseek_v3.1"),
         ];
         let mut legacy: Vec<(String, &str)> = tools
             .list_parsers()
