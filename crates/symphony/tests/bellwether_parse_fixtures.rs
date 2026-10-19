@@ -566,6 +566,10 @@ const MODELS: &[(&str, GenerationPrompt)] = &[
         "llama-3.3-nemotron-70b-reward-principle",
         GenerationPrompt::Plain,
     ),
+    // Llama 3.2's own template: the same one call alone, `parameters` naming the arguments, no
+    // thought; the model's `<|python_tag|>`, which the template never writes, is dropped.
+    ("llama-3.2-1b-instruct", GenerationPrompt::Plain),
+    ("llama-3.2-11b-vision-instruct", GenerationPrompt::Plain),
     // FunctionGemma: Gemma's calls between `<start_function_call>` and `<end_function_call>`,
     // `<escape>` around a string and `None` for a null; the template has no thought.
     ("functiongemma-270m-it", GenerationPrompt::Plain),
@@ -820,6 +824,14 @@ const MEASURED_OPENERS: &[(&str, &str)] = &[
     ("a.x-4.0-light", "<|im_start|><|assistant|>"),
     (
         "bytedance-seed-oss-36b-alternate-tokenizer",
+        "<|start_header_id|>assistant<|end_header_id|>",
+    ),
+    (
+        "llama-3.2-1b-instruct",
+        "<|start_header_id|>assistant<|end_header_id|>",
+    ),
+    (
+        "llama-3.2-11b-vision-instruct",
         "<|start_header_id|>assistant<|end_header_id|>",
     ),
     ("exaone-4.5-33b", "<|assistant|>"),
