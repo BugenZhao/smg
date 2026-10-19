@@ -1880,8 +1880,15 @@ mod tests {
             named_table(&pair(Some("kimi_k3"), Some("qwen3"))),
             Some(Table::KimiK3)
         );
+        // The older `pythonic` parser's name serves more than one family, so it keeps the
+        // legacy parsers until every one of them has a table; the Llama 4 table answers to
+        // its exact alias.
         assert_eq!(named_table(&pair(Some("pythonic"), None)), None);
         assert_eq!(named_table(&pair(Some("pythonic"), Some("qwen3"))), None);
+        assert_eq!(
+            named_table(&pair(Some("llama4_pythonic"), None)),
+            Some(Table::Llama4)
+        );
         // The older `llama` parser's format is the json table's.
         assert_eq!(named_table(&pair(Some("llama"), None)), Some(Table::Json));
         // The older DeepSeek pairings read with the tables, the thought included: the R1 line
@@ -1922,8 +1929,9 @@ mod tests {
                 // (`names_are_checked_against_both_registries_by_the_parser_in_force`).
                 continue;
             }
-            // A launcher's name for a family whose table has no older parser passes under
-            // Symphony in both flags, in either alone, and beside the table's own name.
+            // A name no legacy registry has (a launcher's for a family whose table has no older
+            // parser, an engine's exact name for a table) passes under Symphony in both flags, in
+            // either alone, and beside the table's own name.
             launchers.push(alias);
             let doubled = names(Some(alias), Some(alias));
             assert_eq!(named_table(&doubled.labels), Some(table), "{alias}");
@@ -1950,7 +1958,7 @@ mod tests {
                 "{alias}"
             );
         }
-        assert_eq!(launchers, ["muse"]);
+        assert_eq!(launchers, ["llama4_pythonic", "muse"]);
     }
 
     /// Every name of the two legacy registries answers to the table the flip maps it to (its
