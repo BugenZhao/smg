@@ -262,7 +262,7 @@ mod tests {
         "{\"title\": \"Braces\", \"body\": \"a } b { c\"}<|tool_call_end|><|tool_calls_section_end|>"
     );
 
-    fn run_with(prompt: &str, pieces: &[&str], finish: EngineFinish) -> Vec<Event> {
+    fn run_with(prompt: &str, pieces: &[&str], finish: EngineFinish) -> Vec<Event<'static>> {
         drive_to(
             &mut Engine::new(kimi_k2(), Declared::default()),
             prompt,
@@ -271,7 +271,7 @@ mod tests {
         )
     }
 
-    fn run(prompt: &str, pieces: &[&str]) -> Vec<Event> {
+    fn run(prompt: &str, pieces: &[&str]) -> Vec<Event<'static>> {
         drive(
             &mut Engine::new(kimi_k2(), Declared::default()),
             prompt,
@@ -280,7 +280,7 @@ mod tests {
     }
 
     /// The calls' ids, in order.
-    fn ids(events: &[Event]) -> Vec<&str> {
+    fn ids<'a>(events: &'a [Event<'_>]) -> Vec<&'a str> {
         events
             .iter()
             .filter_map(|event| match event {
@@ -290,7 +290,7 @@ mod tests {
             .collect()
     }
 
-    fn starts(events: &[Event]) -> Vec<(u32, &str, &str)> {
+    fn starts<'a>(events: &'a [Event<'_>]) -> Vec<(u32, &'a str, &'a str)> {
         events
             .iter()
             .filter_map(|event| match event {
@@ -299,17 +299,17 @@ mod tests {
                     name,
                     source,
                     ..
-                } => Some((*index, name.as_str(), source.text.as_str())),
+                } => Some((*index, name.as_str(), &*source.text)),
                 _ => None,
             })
             .collect()
     }
 
-    fn ends(events: &[Event]) -> Vec<&str> {
+    fn ends<'a>(events: &'a [Event<'_>]) -> Vec<&'a str> {
         events
             .iter()
             .filter_map(|event| match event {
-                Event::ToolCallEnd { source, .. } => Some(source.text.as_str()),
+                Event::ToolCallEnd { source, .. } => Some(&*source.text),
                 _ => None,
             })
             .collect()
@@ -319,7 +319,7 @@ mod tests {
         events
             .iter()
             .filter_map(|event| match event {
-                Event::Malformed { text, .. } => Some(text.text.as_str()),
+                Event::Malformed { text, .. } => Some(&*text.text),
                 _ => None,
             })
             .collect()
@@ -333,7 +333,7 @@ mod tests {
                 Event::Dropped {
                     text,
                     why: DropReason::Wrapper,
-                } => Some(text.text.as_str()),
+                } => Some(&*text.text),
                 _ => None,
             })
             .collect()
