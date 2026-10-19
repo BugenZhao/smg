@@ -560,6 +560,16 @@ impl Count<'_> {
         }
     }
 
+    /// The calls a block holds, `between` before every call after the first: [`Count::calls`]
+    /// when the tag holds one call or nothing stands between them, else [`repeated`].
+    fn calls_between(&self, call: Grammar, between: &str) -> Grammar {
+        if self.one || between.is_empty() {
+            self.calls(call)
+        } else {
+            repeated(call, between)
+        }
+    }
+
     /// Tags `triggers` open in free text, as many as the count lets the model write; with one
     /// call, each tag's end carries the end of the turn.
     fn triggered(&self, triggers: Vec<String>, tags: Vec<Tag>) -> Grammar {
@@ -588,6 +598,18 @@ impl Count<'_> {
             stop_after_first: self.one,
         }
     }
+}
+
+/// `item` once or more, `separator` before every repeat: the one shape of a separated list, for
+/// the calls of a block and the members of a value alike.
+fn repeated(item: Grammar, separator: &str) -> Grammar {
+    Grammar::Sequence(vec![
+        item.clone(),
+        Grammar::Star(Box::new(Grammar::Sequence(vec![
+            Grammar::ConstString(separator.to_string()),
+            item,
+        ]))),
+    ])
 }
 
 /// A region's two markers, the terminal of the row into its state and of the row back out, and
@@ -728,10 +750,28 @@ impl Format {
                 None => (pythonic::list_alone(*dialect, &named, count), false),
                 Some(markers) => (pythonic::calls(markers, *dialect, &named, count), true),
             },
-            CallSyntax::NamedArguments(marker) => (
-                json::named_arguments_calls(self, marker, &named, count)?,
-                true,
-            ),
+            // The named-arguments calls sit in a block (DeepSeek V3.1's, V3's) or stand each from
+            // its own opener (Mistral's): in a block, between the block's ways in and its close.
+            CallSyntax::NamedArguments {
+                marker,
+                between_calls,
+            } => {
+                let ways_in = markers.map(|markers| self.ways_into_block(markers));
+                (
+                    json::named_arguments_calls(
+                        self,
+                        json::NamedArguments {
+                            marker,
+                            between_calls,
+                        },
+                        markers,
+                        ways_in.as_deref().unwrap_or_default(),
+                        &named,
+                        count,
+                    )?,
+                    true,
+                )
+            }
             CallSyntax::Xml => (xml::calls(markers?, self.separator(), &named, count)?, true),
             CallSyntax::Gemma(spelling) => (gemma::calls(markers?, *spelling, &named, count), true),
             CallSyntax::NamedJson(marker) => {
@@ -1211,17 +1251,20 @@ impl Format {
 
     /// What free text before a tag may not write: the table's terminals, but `kept` and those
     /// written inside one of them (a kept close `<e></t>` holds the terminal `<e>`, and free text
-    /// that excluded `<e>` could never write the close), and the call syntax's inner tags.
+    /// that excluded `<e>` could never write the close), and the call syntax's inner tags. The
+    /// named-arguments marker is not among them: it stands only after the call's opener, a
+    /// terminal the text cannot write, and in one table it is ordinary text (DeepSeek V3's fence),
+    /// which a thought may well hold.
     fn excluded_but(&self, kept: &[&str]) -> Vec<String> {
         let mut excludes: Vec<String> = self
             .terminal_texts()
             .filter(|text| !kept.iter().any(|kept| kept.contains(text)))
             .map(str::to_string)
             .collect();
-        let inner = self
-            .call_syntax()
-            .map(CallSyntax::tag_texts)
-            .unwrap_or_default();
+        let inner = match self.call_syntax() {
+            Some(CallSyntax::NamedArguments { .. }) | None => Vec::new(),
+            Some(syntax) => syntax.tag_texts(),
+        };
         excludes.extend(inner.iter().map(|tag| tag.to_string()));
         excludes
     }
@@ -2424,6 +2467,8 @@ mod tests {
                 "at_least_one": true,
             }})
         );
+        // The free text keeps the thought's own markers, and the arguments marker too: `[ARGS]`
+        // opens no call without `[TOOL_CALLS]` before it, which the text cannot write.
         let open = formats::mistral_v13()
             .grammar(&tools, true, true)
             .expect("a grammar");
@@ -2433,7 +2478,7 @@ mod tests {
                 if parts.len() == 2
                     && matches!(&parts[0], Grammar::AnyText { excludes }
                         if excludes.contains(&"[TOOL_CALLS]".to_string())
-                            && excludes.contains(&"[ARGS]".to_string())
+                            && !excludes.contains(&"[ARGS]".to_string())
                             && !excludes.contains(&"[THINK]".to_string()))
         ));
     }
