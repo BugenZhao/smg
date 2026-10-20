@@ -747,6 +747,22 @@ impl Format {
         self
     }
 
+    /// The layout's text after the thought's close replaced by `after`, the close kept: a
+    /// checkpoint group whose template writes other text there than its table's (the registry's
+    /// `after`: the NVIDIA Nemotron 3 groups and Step 3.5 Flash write one newline before a call
+    /// where the Qwen 3.5 template writes two). A table without a thought layout is left as it is.
+    #[must_use]
+    pub fn with_thought_after(mut self, after: &str) -> Self {
+        if let Some(thought) = self
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.thought.as_mut())
+        {
+            thought.after = after.into();
+        }
+        self
+    }
+
     /// The table's layout, if it has one.
     pub fn layout(&self) -> Option<&Layout> {
         self.layout.as_deref()
@@ -1138,6 +1154,26 @@ impl Format {
     /// thinking turned off opens and closes it there.
     pub fn reasoning_open(&self, prompt: &str) -> bool {
         self.emits(self.prompt_state(prompt)) == Emits::Reasoning
+    }
+
+    /// Whether `prompt` closed the thought itself and wrote what the template writes after the
+    /// close (a request with thinking switched off: Qwen3's `<think>\n\n</think>\n\n`), so the
+    /// structural tags owe none of it before their first text
+    /// ([`Options::thought_closed`](crate::grammar::Options::thought_closed)). `false` for a table
+    /// whose layout has no thought, a prompt that leaves the thought open or to the model, and
+    /// one that ends with the bare close (GLM 4.6's `<think></think>`, whose newline the tag still
+    /// writes).
+    pub fn thought_closed(&self, prompt: &str) -> bool {
+        let Some(thought) = self.layout().and_then(|layout| layout.thought.as_ref()) else {
+            return false;
+        };
+        let Some(close) = thought.close.as_deref() else {
+            return false;
+        };
+        !thought.after.is_empty()
+            && prompt
+                .strip_suffix(&*thought.after)
+                .is_some_and(|before| before.ends_with(close))
     }
 
     /// The format's name.

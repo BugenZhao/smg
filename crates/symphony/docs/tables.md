@@ -22,6 +22,17 @@ The definition is the table below; the `Engine` runs it, and decides everything 
   thought alike: every earlier turn opens with `<think>`, closed at once when it has no thought,
   and the generation prompt leaves the model to write `<think>` (`<think></think>` with thinking
   off): the same rows read both, as the recorded sets of the four groups show.
+- The table carries its template's two newlines after the thought's close (`</think>\n\n` before
+  the content or the first call) as its thought layout, so a forced call written where the close
+  left the engine begins with them and not with `<tool_call>` (`grammar`); a prompt with thinking
+  switched off has written them itself (`</think>\n\n` at its end), and the tag owes none. MiMo's
+  template writes what follows right after the close, and `qwen3_tagged_direct` carries none. The
+  NVIDIA Nemotron 3 groups (Nemotron 3, 3.5 Lightning, Labs 3, Cascade 2, Cosmos3 Edge) and Step
+  3.5 Flash read with `qwen3_tagged` but write one newline there (`</think>\n<tool_call>`): their
+  entries in `groups.json` carry the one newline as the group's `after`, which replaces the
+  table's, the close kept (`registry`). The Nemotron 3 groups' thinking-off prompt ends with the
+  bare `<think></think>`, so the newline stays the tag's; Step 3.5 Flash's prompt always opens the
+  thought.
 
 The tests here are the engine's as much as this format's: they were written against the hand-written
 parser this table replaced, and hold the table to the same events.
@@ -217,6 +228,12 @@ is the terminal that leaves the call. Beyond that:
 The template writes a newline before the thought, before the content and before every call, and
 strips the content's edges, so those newlines are the model's to write and reach the content stream;
 whose they are is bellwether #17's question, as for Qwen3.
+
+The table carries its template's newline after the thought's close (`</think>\n` before the content
+or the first call) as its thought layout, so a forced call written where the close left the engine
+begins with it and not with `<tool_call>` (`grammar`); a prompt with thinking switched off ends with
+the bare `<think></think>`, so the newline stays the tag's to write. A `<tool_call>` inside the
+thought stays thought text, as for Qwen3.
 
 ## MiniMax M2 (`minimax_m2`)
 
@@ -587,7 +604,11 @@ newlines around the thought and before the calls reach the reasoning and content
 #17's question). A turn opens with `<|im_start|>assistant`, so the prompt's replay starts there.
 
 A forced call's structural tag is each call as a tag its opener triggers, the parameter tags with
-nothing between them (`grammar`).
+nothing between them (`grammar`). The table carries its template's two newlines after the thought's
+close (`</think>\n\n` before the content or the first call) as its thought layout, so a forced call
+written where the close left the engine begins with them and not with `<function name="`; a prompt
+with thinking switched off has written them itself, and the tag owes none. The table's row out of
+the thought on a call's opener reads a call wherever it stands, inside the thought too.
 
 ## dots3 (`dots3`)
 
@@ -601,6 +622,14 @@ thought and before a block are the model's to write and reach the reasoning and 
 prompt is `<|assistant|>` alone, or with the thought closed empty (`<think>\n\n</think>\n\n`) when
 the request turns thinking off, as Qwen3's does; a turn opens with `<|assistant|>`, so the prompt's
 replay starts there.
+
+The table carries its template's two newlines after the thought's close (`</think>\n\n` before the
+content or the calls) as its thought layout, so a forced call written where the close left the
+engine begins with them and not with `<dots_function_call>` (`grammar`); a prompt with thinking
+switched off has written them itself, and the tag owes none. The newline the template
+writes before every block is the call's own lead, which the tag does not write: a block written
+after the two newlines reads as one written after three. The table's row out of the thought on the
+block's opener reads a block wherever it stands, inside the thought too.
 
 ## Gemma 4 (`gemma4`)
 
