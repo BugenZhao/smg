@@ -77,6 +77,9 @@ pub(crate) async fn load_history(
         );
         continues = true;
     }
+    // Where the chain's items end, for the pass below (resolution maps every
+    // item to one item, so it holds after it).
+    let chain_items = history.len();
 
     if let Some(conversation) = &request.conversation {
         history.extend(conversation_items(stores, conversation.as_id(), tenant).await?);
@@ -101,6 +104,35 @@ pub(crate) async fn load_history(
             let resolved =
                 resolve_item_references(stores.responses.as_ref(), items.clone(), tenant).await?;
             loaded.input = ResponseInput::Items(resolved);
+        }
+    }
+
+    // The chain's items, their references resolved (a stored call behind an
+    // `item_reference` counts as loaded): the results of calls that did not
+    // survive the reload go. A chain is cut at the store's depth cap, at an
+    // expired or deleted record or at another tenant's, with no word of it,
+    // and the oldest turn kept then opens with the result of a call the turn
+    // before it issued, which is gone: it answers nothing the request
+    // replays, and the contract profiles refuse a tool result with no call
+    // before it (`ProviderProfile::unanswerable_tool_result`), so keeping it
+    // would refuse every later request on the chain for a call the client
+    // never sent. A conversation's window keeps its own rule
+    // (`conversation_items`), and the request's own items stay out of it: a
+    // result among them with no call before it is the client's and keeps its
+    // refusal.
+    if chain_items > 0 {
+        if let ResponseInput::Items(items) = &mut loaded.input {
+            let rest = items.split_off(chain_items);
+            let before = items.len();
+            let mut kept = without_outputs_of_missing_calls(std::mem::take(items));
+            if kept.len() < before {
+                debug!(
+                    dropped = before - kept.len(),
+                    "dropped the chain's stored tool results whose calls did not survive the reload"
+                );
+            }
+            kept.extend(rest);
+            *items = kept;
         }
     }
 
