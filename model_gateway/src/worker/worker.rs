@@ -764,6 +764,17 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
         None
     }
 
+    /// How long the worker's current run of pending prompts (since its
+    /// pending backlog last left zero) has waited for its first answer,
+    /// plus the time earlier runs since its latest first response held
+    /// prompts and ended unanswered (given up on, or dropped): its silence,
+    /// the spells it held nothing left out. `None` while nothing is pending,
+    /// once the run has had an answer, or for a worker that does not track
+    /// its runs.
+    fn prefill_unanswered_run(&self) -> Option<Duration> {
+        None
+    }
+
     /// Whether the engine behind the worker is on a prompt shape it has not
     /// shown it runs: a prompt pending on the worker, or one of `tokens`
     /// about to be dispatched, longer than any the worker has answered since
@@ -1995,6 +2006,10 @@ impl Worker for BasicWorker {
 
     fn prefill_answered_ago(&self) -> Option<Duration> {
         self.runtime.load().prefill_answered_ago()
+    }
+
+    fn prefill_unanswered_run(&self) -> Option<Duration> {
+        self.runtime.load().prefill_unanswered_run()
     }
 
     fn prefill_cold_shape(&self, tokens: u64) -> bool {
