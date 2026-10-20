@@ -584,9 +584,13 @@ pub struct Options {
 /// thought: at the first generated token, so the grammar must admit the thought and its close
 /// before what it asks for; or once the engine's own reasoning parser has seen the thought's
 /// close, so the grammar starts where the answer or the calls do and nothing may precede them.
-/// An engine that does not say gets a prefix of free text with nothing owed at its end, which
-/// fits either kind where a trigger opens what follows (a block of calls) and is left as it is
-/// where none does (an answer's schema, which such an engine then holds to loosely). Where the
+/// An engine that does not say gets a prefix of free text with nothing owed at its end where a
+/// trigger opens what follows (a block of calls), which fits either kind; where none does (an
+/// answer's schema) it gets the schema alone, the engine's own constraint applied where that
+/// engine starts, since free text before a schema constrains nothing
+/// ([`Format::answer_grammar_for`]). Engines of either kind, one starting at the first token
+/// beside one that does not among those a request may run on, keep the prefix for the answer too,
+/// loosely, since no other tag fits both. Where the
 /// prompt opens no thought, the start is read by the answer tag of a table whose thought is a
 /// message of its own alone, and only where it names the first token
 /// ([`Format::answer_grammar`]): an engine that starts after its parser may gate on it whatever
@@ -597,6 +601,9 @@ pub enum GrammarStart {
     /// The engine does not say where it starts.
     #[default]
     Unknown,
+    /// The request may run on an engine of either kind: one of the engines that may take it
+    /// starts at the first token and another does not, so the tag takes what fits either.
+    Either,
     /// The engine starts the grammar once its reasoning parser has seen the thought's close.
     AfterReasoning,
     /// The engine starts the grammar at the first generated token.
@@ -901,8 +908,9 @@ impl Format {
     /// `json_schema`, or `json_object` with an object's schema): the rows into the state the
     /// answer is written in, the JSON, and the answer's close with what ends the turn after it.
     /// Where the output starts in that state (the content of ChatML's tables, of Gemma 4's,
-    /// MiniMax's, DeepSeek's), the tag is the schema alone, after the prefix [`Self::grammar`]
-    /// writes when the prompt left the model inside its thought; a table whose turn ends at a
+    /// MiniMax's, DeepSeek's), the tag is the schema alone, with the prompt's open thought left
+    /// to the engine where it does not say where it starts the grammar
+    /// ([`Self::answer_grammar_for`]); a table whose turn ends at a
     /// stop token writes nothing after it. Otherwise the model starts in the turn's own state, or
     /// in its thought when the prompt opened it, and the tag is one `tag`: the way into the answer
     /// from there, the thought's close first as a call's way in has it, the schema, then the
@@ -925,7 +933,10 @@ impl Format {
     /// [`Self::answer_grammar`] for an engine whose grammar starts at `start`: an engine that
     /// starts after its reasoning parser has seen the thought's close gets the schema alone, as
     /// the answer begins where its grammar does; one that starts at the first token gets the
-    /// thought, closed, before the schema ([`Self::led`]).
+    /// thought, closed, before the schema ([`Self::led`]); one that does not say gets the schema
+    /// alone as well, its own constraint applied where it starts, and engines of either kind
+    /// ([`GrammarStart::Either`]) keep the prefix a forced call takes, loosely, since no one tag
+    /// fits both.
     pub fn answer_grammar_for(
         &self,
         schema: &Value,
@@ -952,6 +963,23 @@ impl Format {
             let answer = match parts.len() {
                 1 => parts.remove(0),
                 _ => Grammar::Sequence(parts),
+            };
+            // A prefix of free text cannot lead an answer. It leads a forced call because the
+            // call's marker is excluded from it, so the marker the model writes can only open
+            // the tag; an answer has no marker, nothing in the prefix says where the schema
+            // begins, and the model writes what it likes before and after its JSON (a fence, a
+            // note), with the end of the turn masked, once its text has left the schema, until
+            // a whole JSON follows: the answer runs to the token budget unconstrained. So where
+            // the engine does not say where it starts, the answer's tag is the one an engine
+            // that gates the grammar behind its reasoning parser gets, the schema alone: that
+            // engine applies it where the answer begins, and one that starts at the first
+            // token applies it there, as its own server does with the request's schema; the
+            // closed thought leads the schema only where the engine says it starts there. Where
+            // the engines that may take the request are of either kind, no one tag fits both,
+            // and the prefix stays, loosely, as before.
+            let start = match start {
+                GrammarStart::Unknown if reasoning_open => GrammarStart::AfterReasoning,
+                start => start,
             };
             return self
                 .led(answer, reasoning_open, false, true, start, "")
@@ -1028,7 +1056,12 @@ impl Format {
                             parts.push(Grammar::Optional(Box::new(thought)));
                             parts.push(opener);
                         }
-                        (Some(opener), GrammarStart::AfterReasoning | GrammarStart::Unknown) => {
+                        (
+                            Some(opener),
+                            GrammarStart::AfterReasoning
+                            | GrammarStart::Unknown
+                            | GrammarStart::Either,
+                        ) => {
                             parts.push(Grammar::Optional(Box::new(Grammar::Or(vec![
                                 Grammar::Sequence(vec![thought, opener.clone()]),
                                 opener,
@@ -1100,8 +1133,12 @@ impl Format {
                 // a prefix, else the engine would force the tag's first text (a way in restating
                 // the close, or the body itself) before the model has thought.
                 GrammarStart::FirstToken => self.after_the_closed_thought(body, after),
-                GrammarStart::Unknown if prefixed => self.after_the_thought(body, after),
-                GrammarStart::Unknown => Some(body),
+                // The engine does not say, or the engines that may take the request are of
+                // either kind: the prefix that fits both where the tag takes one.
+                GrammarStart::Unknown | GrammarStart::Either if prefixed => {
+                    self.after_the_thought(body, after)
+                }
+                GrammarStart::Unknown | GrammarStart::Either => Some(body),
             };
         }
         if !self.writes_thought_first() {
@@ -3286,36 +3323,44 @@ mod tests {
     }
 
     #[test]
-    fn with_the_thought_open_the_answer_follows_the_prefix_a_forced_call_takes() {
-        // The prefix is the forced call's: the thought's own markers writable, so the model
-        // closes its thought where the engine runs the grammar from the first token; every other
-        // terminal and the syntax's inner tags not; nothing owed at its end.
-        let schema = value!({"type": "json_schema", "json_schema": answer_schema()});
-        assert_eq!(
-            answer(&formats::qwen3(CallSyntax::Json), true),
-            Some(value!({"format": {"type": "sequence", "elements": [
-                {"type": "any_text", "excludes": ["<tool_call>", "</tool_call>"]},
-                schema,
-            ]}}))
-        );
+    fn with_the_thought_open_and_the_engine_silent_the_answer_is_the_schema_alone() {
+        // A forced call takes a prefix of free text with its markers excluded, so the marker the
+        // model writes can only open the tag; an answer has no marker, and free text before the
+        // schema would let the model write a fence, a note, anything, with the end of the turn
+        // masked until a whole JSON follows. So where the engine does not say where it starts
+        // the grammar, the answer is the schema alone, as after the reasoning parser's gate,
+        // while the forced call keeps its prefix.
+        let alone = value!({"format": {"type": "json_schema", "json_schema": answer_schema()}});
         let tools = weather_tools();
         for format in [
+            formats::qwen3(CallSyntax::Json),
             formats::glm(),
             formats::gemma4(),
             formats::minimax_m2(),
             formats::deepseek_v4_1(),
         ] {
+            assert_eq!(
+                answer(&format, true),
+                Some(alone.clone()),
+                "{}",
+                format.name()
+            );
+            assert_eq!(
+                answer(&format, true),
+                format
+                    .answer_grammar_for(&answer_schema(), true, GrammarStart::AfterReasoning)
+                    .map(|grammar| grammar.payload()),
+                "{}: as after the gate",
+                format.name()
+            );
             let call = format
                 .grammar(&tools, true, true)
                 .expect("a grammar")
                 .payload();
             assert_eq!(
-                answer(&format, true),
-                Some(value!({"format": {"type": "sequence", "elements": [
-                    call["format"]["elements"][0].clone(),
-                    schema,
-                ]}})),
-                "{}",
+                call["format"]["elements"][0]["type"],
+                "any_text",
+                "{}: the forced call keeps its prefix",
                 format.name()
             );
         }
@@ -3324,6 +3369,92 @@ mod tests {
             answer(&formats::plain(), true),
             answer(&formats::plain(), false)
         );
+    }
+
+    #[test]
+    fn with_the_thought_open_and_engines_of_either_kind_the_answer_keeps_the_prefix() {
+        // The engines a request may run on name different starts: one would force the schema
+        // from the first token, inside the open thought, the other applies it after its gate,
+        // and no one tag fits both. The answer keeps the prefix a forced call takes, the
+        // thought's own markers writable so the model closes it, loosely, as before.
+        let schema = value!({"type": "json_schema", "json_schema": answer_schema()});
+        let tools = weather_tools();
+        for format in [
+            formats::qwen3(CallSyntax::Json),
+            formats::glm(),
+            formats::gemma4(),
+            formats::minimax_m2(),
+            formats::deepseek_v4_1(),
+        ] {
+            let call = format
+                .grammar_for(
+                    &tools,
+                    Options {
+                        at_least_one: true,
+                        reasoning_open: true,
+                        thought_closed: false,
+                        one_call: false,
+                        start: GrammarStart::Either,
+                    },
+                )
+                .expect("a grammar")
+                .payload();
+            assert_eq!(
+                format
+                    .answer_grammar_for(&answer_schema(), true, GrammarStart::Either)
+                    .map(|grammar| grammar.payload()),
+                Some(value!({"format": {"type": "sequence", "elements": [
+                    call["format"]["elements"][0].clone(),
+                    schema,
+                ]}})),
+                "{}",
+                format.name()
+            );
+            assert_eq!(
+                call["format"]["elements"][0]["type"],
+                "any_text",
+                "{}: the forced call's prefix",
+                format.name()
+            );
+        }
+    }
+
+    #[test]
+    fn no_answer_tag_begins_with_free_text() {
+        // Free text before a schema constrains nothing (the test above): whatever the table,
+        // whether the prompt left the thought open, and wherever the engine starts the grammar,
+        // an answer's tag never begins with it. Engines of either kind are the one exception,
+        // pinned above: the prefix that fits both, loosely, where no other tag does.
+        use crate::formats::registry::Table;
+        let first = |payload: &Value| -> Value {
+            let format = &payload["format"];
+            match format["type"].as_str() {
+                Some("sequence") => format["elements"][0]["type"].clone(),
+                _ => format["type"].clone(),
+            }
+        };
+        for table in Table::ALL {
+            let format = table.format();
+            for reasoning_open in [false, true] {
+                for start in [
+                    GrammarStart::Unknown,
+                    GrammarStart::AfterReasoning,
+                    GrammarStart::FirstToken,
+                ] {
+                    let Some(grammar) =
+                        format.answer_grammar_for(&answer_schema(), reasoning_open, start)
+                    else {
+                        continue;
+                    };
+                    assert_ne!(
+                        first(&grammar.payload()),
+                        "any_text",
+                        "{}: thought open {reasoning_open}, start {start:?}",
+                        table.name()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -3428,8 +3559,9 @@ mod tests {
     ) {
         // xLAM's one state reads calls, and its answer is whatever is not a list. MiniMax M3's
         // thought closes into a content state of its own, not where it opened: as for a forced
-        // call, the answer admits the thought the model may write first, and the open thought
-        // takes the prefix with its close kept writable.
+        // call, the answer admits the thought the model may write first; with the thought open
+        // and the engine silent on where it starts, the answer is the schema alone, as for every
+        // answer written in the turn's own state.
         assert_eq!(answer(&formats::xlam(), false), None);
         let closed = answer(&formats::minimax_m3(), false).expect("an answer tag");
         assert_eq!(closed["format"]["type"], "sequence");
@@ -3440,13 +3572,7 @@ mod tests {
         );
         assert_eq!(closed["format"]["elements"][1]["type"], "json_schema");
         let open = answer(&formats::minimax_m3(), true).expect("an answer tag");
-        assert_eq!(
-            open["format"]["elements"][0],
-            value!({"type": "any_text", "excludes": [
-                "<tool_call>", "</tool_call>", "<invoke name=\"", "</invoke>", "]<]minimax[>[",
-            ]})
-        );
-        assert_eq!(open["format"]["elements"][1]["type"], "json_schema");
+        assert_eq!(open["format"]["type"], "json_schema", "{open}");
     }
 
     #[test]
@@ -3517,8 +3643,9 @@ mod tests {
 
     #[test]
     fn a_prompt_left_inside_the_thought_gets_the_prefixed_tag_not_a_refusal() {
-        // Where the replay leaves the model in its thought, the forced call and the JSON answer
-        // follow the prefix, so the model finishes its thought first; neither is refused.
+        // Where the replay leaves the model in its thought, the forced call follows the prefix,
+        // so the model finishes its thought first, and the JSON answer is the schema alone, the
+        // engine's own constraint; neither is refused.
         let tools = weather_tools();
         let prompt = format!("{CHATML_TURN}<think>\n");
         for table in [formats::Table::Qwen3Tagged, formats::Table::Qwen3] {
@@ -3543,7 +3670,7 @@ mod tests {
                 assert_eq!(call["format"]["elements"][0]["type"], "any_text");
             }
             let answer = answer(&format, reasoning_open).expect("an answer");
-            assert_eq!(answer["format"]["elements"][0]["type"], "any_text");
+            assert_eq!(answer["format"]["type"], "json_schema", "{table:?}");
         }
         let deepseek = formats::deepseek_v4_1();
         let reasoning_open = deepseek.reasoning_open("<｜User｜>q<｜Assistant｜><think>\n");
@@ -3589,10 +3716,14 @@ mod tests {
                 .expect("a tag")
                 .payload()
         };
-        let unknown = answer_for(GrammarStart::Unknown);
-        assert_eq!(unknown["format"]["type"], "sequence");
-        assert_eq!(unknown["format"]["elements"][0]["type"], "any_text");
-        assert_eq!(unknown["format"]["elements"][1], schema);
+        // Where the engine does not say where it starts, the answer is the schema alone, as
+        // after the gate: a free-text prefix would let the answer run on unconstrained, where a
+        // forced call's prefix still takes it, its markers excluded from the free text.
+        assert_eq!(
+            answer_for(GrammarStart::Unknown),
+            value!({"format": schema}),
+            "the schema alone where the engine does not say"
+        );
         assert_eq!(
             calls_for(GrammarStart::Unknown)["format"]["elements"][0]["type"],
             "any_text"
