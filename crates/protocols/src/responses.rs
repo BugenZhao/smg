@@ -3487,9 +3487,13 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
     };
 
     let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
+    // `none` and `auto` name no tool, so they stand without tools (with nothing
+    // to call, `auto` answers in text as an omitted `tool_choice` does); Codex
+    // sends `tools: []` with `tool_choice: "auto"` when it compacts a
+    // conversation.
     let is_some_choice = !matches!(
         tool_choice,
-        ResponsesToolChoice::Options(ToolChoiceOptions::None)
+        ResponsesToolChoice::Options(ToolChoiceOptions::None | ToolChoiceOptions::Auto)
     );
 
     // Check if tool_choice requires tools but none are provided
