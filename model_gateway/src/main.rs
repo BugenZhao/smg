@@ -463,10 +463,12 @@ struct RoutingArgs {
 
     /// Spill gate, absolute part: a matched worker is skipped for the
     /// least-loaded one when its load exceeds the healthy-fleet mean by this
-    /// many requests AND by --balance-rel-threshold. The margin is capped at
-    /// the in-flight count's natural swing at the pool's current mean (two
-    /// standard deviations, never under four requests unless this value is
-    /// lower), so a small pool can spill at all. With the bucket policy the
+    /// many requests AND by --balance-rel-threshold. The margin is this value
+    /// capped at the larger of the in-flight count's natural swing at the
+    /// pool's current mean (two standard deviations, never under four
+    /// requests unless this value is lower) and the held prefix's price
+    /// (--balance-prefix-margin-tokens, unpriced by default), so a small pool
+    /// can spill at all. With the bucket policy the
     /// pair keeps its own rule: balancing when (max_load - min_load) exceeds
     /// this value and max_load exceeds min_load times --balance-rel-threshold
     #[arg(
@@ -486,6 +488,33 @@ struct RoutingArgs {
         help_heading = "Routing Policy"
     )]
     balance_rel_threshold: f32,
+
+    /// Spill gate, price of a held prefix in tokens per request (0, the
+    /// default, leaves held prefixes unpriced): a matched worker's absolute
+    /// margin is at least the tokens of the request's prefix it holds over
+    /// this value, rounded up, up to --balance-abs-threshold. A spill gives
+    /// the prefix up and the other worker prefills it again, so a priced deep
+    /// prefix (a long conversation's follow-up) keeps its holder through a
+    /// skew that moves a shallow one. Suits prefill pools serving long
+    /// multi-turn sessions, e.g. 1024 (the mean prefill a queued request is
+    /// priced at). Trade-offs: a deep holder sheds only past
+    /// --balance-abs-threshold; a long prefix many sessions share replicates
+    /// later; the price counts the holder's whole match even when the spill
+    /// target holds part of it; without KV events the held length is the
+    /// approximate tree's routing history, not confirmed engine residency.
+    /// Decode picks are never priced
+    #[arg(long, default_value_t = 0, help_heading = "Routing Policy")]
+    balance_prefix_margin_tokens: u32,
+
+    /// Credit a cache_aware pick on a worker holding the request's prefix
+    /// with the prompt it still has to prefill (its token count less the
+    /// held tokens, never under the mean prefill nor over the whole prompt)
+    /// instead of the whole prompt, in the expected-wait estimate later picks
+    /// read, so a hit on a long cached conversation does not steer the next
+    /// miss away from that worker as if it were the whole context's work.
+    /// Misses, spills and decode picks keep the whole prompt. Off by default
+    #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
+    balance_uncached_credit: bool,
 
     /// Seconds between the bucket policy's boundary adjustments (at least 1)
     #[arg(long, default_value_t = 5, help_heading = "Routing Policy")]
@@ -2561,6 +2590,8 @@ impl CliArgs {
                 selection_policy: (self.routing.selection_policy != DEFAULT_SELECTION_POLICY)
                     .then(|| self.routing.selection_policy.clone()),
                 selection_accounting_ttl_ms: self.routing.selection_accounting_ttl_ms,
+                balance_prefix_margin_tokens: self.routing.balance_prefix_margin_tokens,
+                balance_uncached_credit: self.routing.balance_uncached_credit,
             },
             "power_of_two" => PolicyConfig::PowerOfTwo {
                 load_metric: self.routing.power_of_two_load_metric,
@@ -5489,6 +5520,50 @@ mod tests {
                 assert_eq!(*cache_ttl_secs, 180);
                 assert!(cache_boundaries.is_empty());
             }
+            other => panic!("expected cache_aware policy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn balance_prefix_margin_tokens_flag_reaches_the_cache_aware_policy() {
+        let priced = cli_args_from(&["--balance-prefix-margin-tokens", "4096"])
+            .to_router_config(vec![], vec![])
+            .unwrap();
+        match &priced.policy {
+            PolicyConfig::CacheAware {
+                balance_prefix_margin_tokens,
+                ..
+            } => assert_eq!(*balance_prefix_margin_tokens, 4096),
+            other => panic!("expected cache_aware policy, got {other:?}"),
+        }
+        let defaults = cli_args_from(&[]).to_router_config(vec![], vec![]).unwrap();
+        match &defaults.policy {
+            PolicyConfig::CacheAware {
+                balance_prefix_margin_tokens,
+                ..
+            } => assert_eq!(*balance_prefix_margin_tokens, 0),
+            other => panic!("expected cache_aware policy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn balance_uncached_credit_flag_reaches_the_cache_aware_policy_and_defaults_off() {
+        let on = cli_args_from(&["--balance-uncached-credit"])
+            .to_router_config(vec![], vec![])
+            .unwrap();
+        match &on.policy {
+            PolicyConfig::CacheAware {
+                balance_uncached_credit,
+                ..
+            } => assert!(*balance_uncached_credit),
+            other => panic!("expected cache_aware policy, got {other:?}"),
+        }
+        let off = cli_args_from(&[]).to_router_config(vec![], vec![]).unwrap();
+        match &off.policy {
+            PolicyConfig::CacheAware {
+                balance_uncached_credit,
+                ..
+            } => assert!(!*balance_uncached_credit),
             other => panic!("expected cache_aware policy, got {other:?}"),
         }
     }

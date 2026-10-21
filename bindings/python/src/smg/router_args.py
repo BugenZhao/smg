@@ -306,8 +306,12 @@ class RouterArgs:
     assignment_mode: str | None = None
     backend: str = "sglang"
     balance_abs_threshold: int = 64
+    # The spill gate's price of a held prefix, in tokens per request (0: unpriced)
+    balance_prefix_margin_tokens: int = 0
     balance_rel_threshold: float = 1.5
     balance_token_usage_threshold: float = 1.0
+    # Credit a pick on a holder with the prompt it still has to prefill
+    balance_uncached_credit: bool = False
     block_size: int = 16
     bootstrap_port_annotation: str = "sglang.ai/bootstrap-port"
     bucket_adjust_interval_secs: int = 5
@@ -1008,9 +1012,11 @@ class RouterArgs:
             help=(
                 "Spill gate, absolute part: a matched worker is skipped for the least-loaded one"
                 " when its load exceeds the healthy-fleet mean by this many requests AND by the"
-                " relative threshold. The margin is capped at the in-flight count's natural swing"
-                " at the pool's current mean (two standard deviations, never under four unless"
-                " this value is lower), so a small pool can spill at all. With the bucket policy"
+                " relative threshold. The margin is this value capped at the larger of the"
+                " in-flight count's natural swing at the pool's current mean (two standard"
+                " deviations, never under four unless this value is lower) and the held prefix's"
+                " price (--balance-prefix-margin-tokens, unpriced by default), so a small pool can"
+                " spill at all. With the bucket policy"
                 " the pair keeps its own rule: balancing when (max_load - min_load) exceeds this"
                 " value and max_load exceeds min_load times the relative threshold."
             ),
@@ -1024,6 +1030,38 @@ class RouterArgs:
                 "Spill gate, relative part: a matched worker is skipped when its load exceeds"
                 " this multiple of the healthy-fleet mean AND the absolute threshold is also met."
                 " Finite, at least 1.0."
+            ),
+        )
+        routing_group.add_argument(
+            f"--{prefix}balance-prefix-margin-tokens",
+            type=int,
+            default=RouterArgs.balance_prefix_margin_tokens,
+            help=(
+                "Spill gate, price of a held prefix in tokens per request (0, the default,"
+                " leaves held prefixes unpriced): a matched worker's absolute margin is at least"
+                " the tokens of the request's prefix it holds over this value, rounded up, up to"
+                " the absolute threshold. A spill gives the prefix up and the other worker"
+                " prefills it again, so a priced deep prefix (a long conversation's follow-up)"
+                " keeps its holder through a skew that moves a shallow one. Suits prefill pools"
+                " serving long multi-turn sessions, e.g. 1024 (the mean prefill a queued request"
+                " is priced at). Trade-offs: a deep holder sheds only past the absolute"
+                " threshold; a long prefix many sessions share replicates later; the price counts"
+                " the holder's whole match even when the spill target holds part of it; without"
+                " KV events the held length is the approximate tree's routing history, not"
+                " confirmed engine residency. Decode picks are never priced."
+            ),
+        )
+        routing_group.add_argument(
+            f"--{prefix}balance-uncached-credit",
+            action="store_true",
+            help=(
+                "Credit a cache-aware pick on a worker holding the request's prefix with the"
+                " prompt it still has to prefill (its token count less the held tokens, never"
+                " under the mean prefill nor over the whole prompt) instead of the whole prompt,"
+                " in the expected-wait estimate later picks read, so a hit on a long cached"
+                " conversation does not steer the next miss away from that worker as if it were"
+                " the whole context's work. Misses, spills and decode picks keep the whole"
+                " prompt. Off by default."
             ),
         )
         routing_group.add_argument(

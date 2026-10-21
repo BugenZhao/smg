@@ -1381,6 +1381,8 @@ mod tests {
             cache_boundaries: Vec::new(),
             selection_policy: None,
             selection_accounting_ttl_ms: 0,
+            balance_prefix_margin_tokens: 0,
+            balance_uncached_credit: false,
         }
     }
 
@@ -1948,6 +1950,8 @@ mod tests {
                 cache_boundaries: Vec::new(),
                 selection_policy: None,
                 selection_accounting_ttl_ms: 0,
+                balance_prefix_margin_tokens: 0,
+                balance_uncached_credit: false,
             },
             rid_override(ManualAssignmentMode::Delegate),
         );
@@ -2435,6 +2439,8 @@ mod tests {
                 cache_boundaries: Vec::new(),
                 selection_policy: None,
                 selection_accounting_ttl_ms: 0,
+                balance_prefix_margin_tokens: 0,
+                balance_uncached_credit: false,
             }
         }
 
@@ -2485,6 +2491,8 @@ mod tests {
             cache_boundaries: Vec::new(),
             selection_policy: None,
             selection_accounting_ttl_ms: 0,
+            balance_prefix_margin_tokens: 0,
+            balance_uncached_credit: false,
         });
 
         // Hinted policy is a fresh per-model instance, not the shared default.
@@ -2558,6 +2566,8 @@ mod tests {
             cache_boundaries: Vec::new(),
             selection_policy: None,
             selection_accounting_ttl_ms: 0,
+            balance_prefix_margin_tokens: 0,
+            balance_uncached_credit: false,
         }));
 
         for round in 0..64 {
