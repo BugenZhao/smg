@@ -9,12 +9,15 @@
 
 use std::collections::HashMap;
 
+use serde_json::Value;
+
 use crate::{
     encoder_inputs::PreprocessedEncoderInputs,
     registry::{
         MediaPartOrder, ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult,
     },
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
+    vision::{DeepseekV41Processor, PreProcessorConfig, VisionPreProcessor},
 };
 
 /// The placeholder text inlined at each image's position; the multimodal
@@ -94,6 +97,21 @@ impl ModelProcessorSpec for DeepseekV41VisionSpec {
             Modality::Image,
             Self::MAX_IMAGES_PER_PROMPT,
         )]))
+    }
+
+    fn vision_processor(
+        &self,
+        _model_config: &Value,
+        _preprocessor_config: &PreProcessorConfig,
+        modality: Modality,
+    ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
+        match modality {
+            Modality::Image => Ok(Box::new(DeepseekV41Processor::new())),
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
     }
 
     fn prompt_replacements(

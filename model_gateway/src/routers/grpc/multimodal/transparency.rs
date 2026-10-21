@@ -2,7 +2,7 @@
 //! engine's own image loader does with an alpha channel before its processor
 //! runs, resolved from the runtime of the workers the request can reach.
 
-use llm_multimodal::{TransparencyPolicy, VisionProcessorRegistry};
+use llm_multimodal::{TransparencyPolicy, VisionPreProcessor};
 
 use crate::worker::{RoutingPool, RuntimeType, WorkerRegistry};
 
@@ -37,21 +37,15 @@ pub(crate) fn engine_transparency_policy(
     shared.map_or(TransparencyPolicy::KeepAlpha, runtime_transparency_policy)
 }
 
-/// The policy the frames of a request to `model_id` decode under: `engine`
-/// (the destination fleet's rule), unless the model's processor takes the
-/// image as decoded and handles alpha itself
-/// ([`VisionPreProcessor::keeps_alpha`](llm_multimodal::VisionPreProcessor::keeps_alpha)).
-/// The lookup is the one the preprocessing stage makes for the same request.
+/// The policy the frames of a request decode under: `engine` (the destination
+/// fleet's rule), unless the model's image processor takes the image as
+/// decoded and handles alpha itself ([`VisionPreProcessor::keeps_alpha`]).
+/// The processor is the one the preprocessing stage runs for the same request.
 pub(crate) fn frame_transparency(
-    registry: &VisionProcessorRegistry,
-    model_id: &str,
-    model_type: Option<&str>,
+    processor: Option<&dyn VisionPreProcessor>,
     engine: TransparencyPolicy,
 ) -> TransparencyPolicy {
-    if registry
-        .find(model_id, model_type)
-        .is_some_and(|processor| processor.keeps_alpha())
-    {
+    if processor.is_some_and(|processor| processor.keeps_alpha()) {
         TransparencyPolicy::KeepAlpha
     } else {
         engine
@@ -351,11 +345,9 @@ mod tests {
     /// One per policy: a processor that keeps alpha overrides the fleet's rule.
     #[test]
     fn a_processor_that_keeps_alpha_decodes_as_stored_under_every_fleet() {
-        let mut registry = VisionProcessorRegistry::new();
-        registry.register("keeps-alpha-model", Box::new(Probe { keeps_alpha: true }));
         for engine in POLICIES {
             assert_eq!(
-                frame_transparency(&registry, "keeps-alpha-model", None, engine),
+                frame_transparency(Some(&Probe { keeps_alpha: true }), engine),
                 TransparencyPolicy::KeepAlpha,
                 "{engine:?}"
             );
@@ -364,15 +356,13 @@ mod tests {
 
     #[test]
     fn a_processor_without_the_override_follows_the_fleet() {
-        let mut registry = VisionProcessorRegistry::new();
-        registry.register("plain-model", Box::new(Probe { keeps_alpha: false }));
         for engine in POLICIES {
             assert_eq!(
-                frame_transparency(&registry, "plain-model", None, engine),
+                frame_transparency(Some(&Probe { keeps_alpha: false }), engine),
                 engine
             );
             assert_eq!(
-                frame_transparency(&registry, "no-such-model", None, engine),
+                frame_transparency(None, engine),
                 engine,
                 "a model without a processor keeps the fleet's rule"
             );

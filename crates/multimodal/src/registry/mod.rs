@@ -223,7 +223,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::registry::test_helpers::TestTokenizer;
+    use crate::{registry::test_helpers::TestTokenizer, Modality, PreProcessorConfig};
 
     /// A checkpoint of this family resolves to a spec by its `model_type`
     /// alone (the served id is often an opaque path).
@@ -247,5 +247,67 @@ mod tests {
             .lookup(&metadata)
             .expect("the gemma4 family has a spec");
         assert_eq!(spec.name(), "gemma4");
+    }
+
+    /// The vision processors come from the spec a model resolves to, so they
+    /// preprocess the way that spec lays out the prompt: a checkpoint known
+    /// only by its `model_type` gets one, and an id that names another
+    /// family's release does not pick that family's processor.
+    #[test]
+    fn a_model_preprocesses_with_the_processors_of_the_spec_it_resolves_to() {
+        let tokenizer = TestTokenizer::new(&[]);
+        let preprocessor_config = PreProcessorConfig::default();
+        for (model_id, model_type, spec_name, image, video) in [
+            ("/models/checkpoint", "llava", "llava", "llava", None),
+            // A LLaVA config under an id that names a LLaVA-NeXT release.
+            ("org/llava-v1.6-vicuna-7b", "llava", "llava", "llava", None),
+            (
+                "/models/checkpoint",
+                "llava_next",
+                "llava_next",
+                "llava-next",
+                None,
+            ),
+            (
+                "/models/checkpoint",
+                "qwen2_vl",
+                "qwen_vl",
+                "qwen2-vl",
+                None,
+            ),
+            (
+                "/models/checkpoint",
+                "qwen3_vl",
+                "qwen3_vl",
+                "qwen3-vl",
+                Some("qwen3-vl"),
+            ),
+        ] {
+            let config = json!({ "model_type": model_type });
+            let metadata = ModelMetadata {
+                model_id,
+                tokenizer: &tokenizer,
+                config: &config,
+            };
+            let registry = ModelRegistry::new();
+            let spec = registry.lookup(&metadata).expect("a vision spec");
+            assert_eq!(spec.name(), spec_name, "{model_id} ({model_type})");
+            let processor = |modality| {
+                spec.vision_processor(&config, &preprocessor_config, modality)
+                    .map(|processor| processor.model_name())
+            };
+            assert_eq!(processor(Modality::Image), Ok(image), "{model_id}");
+            match video {
+                Some(video) => assert_eq!(processor(Modality::Video), Ok(video), "{model_id}"),
+                None => assert_eq!(
+                    processor(Modality::Video),
+                    Err(ModelRegistryError::UnsupportedModality {
+                        spec: spec_name,
+                        modality: Modality::Video,
+                    }),
+                    "{model_id}"
+                ),
+            }
+        }
     }
 }

@@ -12,14 +12,14 @@ use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, EncoderDtype, EncoderFieldLayouts, ImageFrame,
     MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec, PlaceholderRange,
     PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, TrackedMedia, TrackerOutput,
-    TransparencyPolicy, VideoClip, VisionPreProcessor, VisionProcessorRegistry,
+    TransparencyPolicy, VideoClip, VisionPreProcessor,
 };
 use llm_tokenizer::TokenizerTrait;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 use super::{
-    config::{MultimodalComponents, MultimodalModelConfig},
+    config::{MultimodalComponents, MultimodalModelConfig, VisionProcessors},
     encoder_budget::check_item_feature_budget,
     log_mm_timing_enabled,
     pixel_cache::{config_fingerprint, CachedPreprocessedItem, PixelCache, PixelCacheKey},
@@ -43,8 +43,8 @@ struct PreparedMultimodalPart {
 
 /// What every step of a plan's processing reads: the components, the model
 /// and its type, the processor spec and the model config the registry
-/// resolved for it, the tokenizer the cache keys by, and the wire's dtype
-/// and transparency policy.
+/// resolved for it with the vision processors the spec built from it, the
+/// tokenizer the cache keys by, and the wire's dtype and transparency policy.
 struct PlanContext<'a> {
     components: &'a MultimodalComponents,
     model_id: &'a str,
@@ -52,6 +52,7 @@ struct PlanContext<'a> {
     spec: &'a dyn ModelProcessorSpec,
     tokenizer_id: &'a str,
     model_config: &'a MultimodalModelConfig,
+    vision_processors: Arc<VisionProcessors>,
     image_wire_dtype: Option<EncoderDtype>,
     transparency: TransparencyPolicy,
     /// The engine's per-item bound in feature tokens, when known (see
@@ -201,12 +202,11 @@ pub(crate) async fn process_multimodal_plan(
         .model_registry
         .lookup(&metadata)
         .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
+    let vision_processors = model_config.vision_processors(spec);
     // The frames decode under the destination engine's transparency policy,
     // unless the processor takes the image as decoded and handles alpha itself.
     let transparency = frame_transparency(
-        &components.vision_processor_registry,
-        model_id,
-        model_type,
+        vision_processors.image().ok().map(|processor| &**processor),
         transparency,
     );
     timings.config_lookup_ms = elapsed_ms(config_started);
@@ -217,6 +217,7 @@ pub(crate) async fn process_multimodal_plan(
         spec,
         tokenizer_id,
         model_config: &model_config,
+        vision_processors,
         image_wire_dtype,
         transparency,
         encoder_budget,
@@ -519,12 +520,9 @@ async fn cached_images(
     let Some(cache) = &ctx.components.pixel_cache else {
         return Ok(None);
     };
-    let processor = ctx
-        .components
-        .vision_processor_registry
-        .find(ctx.model_id, ctx.model_type);
+    let processor = ctx.vision_processors.image();
     if !(images.len() == 1
-        || (images.len() < 32 && processor.is_some_and(|p| p.supports_per_image_preprocessing())))
+        || (images.len() < 32 && processor.is_ok_and(|p| p.supports_per_image_preprocessing())))
     {
         return Ok(None);
     }
@@ -566,9 +564,8 @@ async fn cached_images(
             preprocess_image_cached(
                 cache.clone(),
                 image.clone(),
-                ctx.components.vision_processor_registry.clone(),
+                ctx.vision_processors.clone(),
                 ctx.model_id.to_string(),
-                ctx.model_type.map(String::from),
                 pp_config.clone(),
                 fingerprint,
                 ctx.image_wire_dtype,
@@ -616,9 +613,7 @@ async fn preprocess_batch(
     ctx: &PlanContext<'_>,
     pp_config: PreProcessorConfig,
 ) -> Result<PreprocessedEncoderInputs> {
-    let registry = ctx.components.vision_processor_registry.clone();
-    let model_id_owned = ctx.model_id.to_string();
-    let model_type_owned = ctx.model_type.map(String::from);
+    let vision_processors = ctx.vision_processors.clone();
     let media_for_preprocess = media.clone(); // cheap Arc refcount bumps
     let video_layouts = ctx
         .spec
@@ -655,11 +650,7 @@ async fn preprocess_batch(
             // pool, rather than one photo after another on this thread.
             ImageFrame::decode_all(&images)
                 .map_err(llm_multimodal::MultiModalError::Media)?;
-            let processor = registry
-                .find(&model_id_owned, model_type_owned.as_deref())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
-                })?;
+            let processor = vision_processors.image()?;
             // Decoded (and cloned) inside the blocking closure, off the async
             // runtime.
             let raw_images: Vec<image::DynamicImage> = images
@@ -671,14 +662,10 @@ async fn preprocess_batch(
                         .map_err(llm_multimodal::MultiModalError::Media)
                 })
                 .collect::<Result<_, _>>()?;
-            preprocess_images(processor, &raw_images, &pp_config, image_wire_dtype)
+            preprocess_images(processor.as_ref(), &raw_images, &pp_config, image_wire_dtype)
         }
         MediaBatch::Videos(videos) => {
-            let processor = registry
-                .find(&model_id_owned, model_type_owned.as_deref())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
-                })?;
+            let processor = vision_processors.video()?;
             // The processor takes one decoded clip at a time; the clips are
             // joined into one batch afterwards, laid out as if processed together.
             let preprocess_clip = |video: &VideoClip| -> Result<PreprocessedEncoderInputs> {
@@ -759,7 +746,7 @@ fn video_request_config(mut config: PreProcessorConfig, video: &VideoClip) -> Pr
 }
 
 /// The config a modality is preprocessed with: video's own when the checkpoint ships one.
-fn preprocessor_config_for(
+pub(super) fn preprocessor_config_for(
     model_config: &MultimodalModelConfig,
     modality: Modality,
 ) -> &PreProcessorConfig {
@@ -788,13 +775,11 @@ fn media_item_infos(media: &MediaBatch) -> Vec<MediaItemInfo> {
 }
 
 /// Pixel-cache lookup and preprocessing for one image.
-#[expect(clippy::too_many_arguments)]
 async fn preprocess_image_cached(
     cache: Arc<PixelCache>,
     image: Arc<ImageFrame>,
-    registry: Arc<VisionProcessorRegistry>,
+    vision_processors: Arc<VisionProcessors>,
     model_id: String,
-    model_type: Option<String>,
     pp_config: PreProcessorConfig,
     fingerprint: u64,
     image_wire_dtype: Option<EncoderDtype>,
@@ -810,9 +795,7 @@ async fn preprocess_image_cached(
     Metrics::record_mm_pixel_cache_lookup(&model_id, false);
 
     let preprocessed = preprocess_image_batch(
-        registry,
-        model_id,
-        model_type,
+        vision_processors,
         pp_config,
         std::slice::from_ref(&image),
         image_wire_dtype,
@@ -832,9 +815,7 @@ async fn preprocess_image_cached(
 }
 
 async fn preprocess_image_batch(
-    registry: Arc<VisionProcessorRegistry>,
-    model_id: String,
-    model_type: Option<String>,
+    vision_processors: Arc<VisionProcessors>,
     pp_config: PreProcessorConfig,
     images: &[Arc<ImageFrame>],
     image_wire_dtype: Option<EncoderDtype>,
@@ -850,10 +831,13 @@ async fn preprocess_image_batch(
                     .map_err(llm_multimodal::MultiModalError::Media)
             })
             .collect::<Result<_, _>>()?;
-        let processor = registry
-            .find(&model_id, model_type.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("No vision processor found for model: {model_id}"))?;
-        preprocess_images(processor, &raw_images, &pp_config, image_wire_dtype)
+        let processor = vision_processors.image()?;
+        preprocess_images(
+            processor.as_ref(),
+            &raw_images,
+            &pp_config,
+            image_wire_dtype,
+        )
     })
     .await
     .map_err(|e| anyhow::Error::new(e).context("Preprocessing task panicked"))?
@@ -1177,16 +1161,12 @@ mod tests {
             temporal_patch_size: Some(4),
             ..Default::default()
         };
-        let with_video = MultimodalModelConfig {
-            config: serde_json::json!({}),
-            preprocessor_config: image_config.clone(),
-            video_preprocessor_config: Some(video_config),
-        };
-        let without_video = MultimodalModelConfig {
-            config: serde_json::json!({}),
-            preprocessor_config: image_config,
-            video_preprocessor_config: None,
-        };
+        let with_video = MultimodalModelConfig::new(
+            serde_json::json!({}),
+            image_config.clone(),
+            Some(video_config),
+        );
+        let without_video = MultimodalModelConfig::new(serde_json::json!({}), image_config, None);
 
         let temporal = |config: &MultimodalModelConfig, modality| {
             preprocessor_config_for(config, modality).temporal_patch_size

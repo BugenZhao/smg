@@ -102,15 +102,11 @@ fn setup(
     reorder: bool,
 ) -> (MultimodalComponents, Arc<Calls>, MultimodalModelConfig) {
     let calls = Arc::new(Calls::default());
-    let mut registry = VisionProcessorRegistry::new();
-    registry.register(
-        "qwen2-vl",
-        Box::new(Processor {
-            calls: calls.clone(),
-            independent,
-            reorder,
-        }),
-    );
+    let processor = Arc::new(Processor {
+        calls: calls.clone(),
+        independent,
+        reorder,
+    });
     let mut components = MultimodalComponents::new(
         Arc::new(MultimodalConfigRegistry::new()),
         None,
@@ -118,16 +114,16 @@ fn setup(
         &MultimodalSettings::default(),
     )
     .unwrap();
-    components.vision_processor_registry = Arc::new(registry);
     components.pixel_cache = Some(Arc::new(PixelCache::new(1024 * 1024)));
     (
         components,
         calls,
-        MultimodalModelConfig {
-            config: serde_json::json!({"model_type": "qwen2_vl"}),
-            preprocessor_config: PreProcessorConfig::default(),
-            video_preprocessor_config: None,
-        },
+        MultimodalModelConfig::new(
+            serde_json::json!({"model_type": "qwen2_vl"}),
+            PreProcessorConfig::default(),
+            None,
+        )
+        .with_vision_processors("qwen_vl", VisionProcessors::of("qwen_vl", processor)),
     )
 }
 
@@ -175,6 +171,7 @@ async fn run_for(
             spec,
             tokenizer_id,
             model_config: config,
+            vision_processors: config.vision_processors(spec),
             image_wire_dtype,
             transparency: TransparencyPolicy::KeepAlpha,
             encoder_budget: None,
@@ -403,8 +400,7 @@ fn transparent_png() -> bytes::Bytes {
 
 fn probe_setup() -> (MultimodalComponents, MultimodalModelConfig, Seen) {
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
-    let mut registry = VisionProcessorRegistry::new();
-    registry.register("qwen2-vl", Box::new(PixelProbe { seen: seen.clone() }));
+    let processor = Arc::new(PixelProbe { seen: seen.clone() });
     let mut components = MultimodalComponents::new(
         Arc::new(MultimodalConfigRegistry::new()),
         None,
@@ -412,15 +408,15 @@ fn probe_setup() -> (MultimodalComponents, MultimodalModelConfig, Seen) {
         &MultimodalSettings::default(),
     )
     .unwrap();
-    components.vision_processor_registry = Arc::new(registry);
     components.pixel_cache = Some(Arc::new(PixelCache::new(1024 * 1024)));
     (
         components,
-        MultimodalModelConfig {
-            config: serde_json::json!({"model_type": "qwen2_vl"}),
-            preprocessor_config: PreProcessorConfig::default(),
-            video_preprocessor_config: None,
-        },
+        MultimodalModelConfig::new(
+            serde_json::json!({"model_type": "qwen2_vl"}),
+            PreProcessorConfig::default(),
+            None,
+        )
+        .with_vision_processors("qwen_vl", VisionProcessors::of("qwen_vl", processor)),
         seen,
     )
 }
@@ -465,6 +461,7 @@ async fn run_probe(
             spec,
             tokenizer_id: "tok",
             model_config: config,
+            vision_processors: config.vision_processors(spec),
             image_wire_dtype: None,
             transparency: policy,
             encoder_budget: None,

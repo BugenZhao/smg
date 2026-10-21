@@ -7,7 +7,7 @@ use crate::{
     encoder_inputs::PreprocessedEncoderInputs,
     registry::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult},
     types::{EncoderFieldLayouts, FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::PreProcessorConfig,
+    vision::{PreProcessorConfig, Qwen3OmniVisionProcessor, VisionPreProcessor},
 };
 
 const IMAGE_PAD_TOKEN: &str = "<|image_pad|>";
@@ -127,6 +127,21 @@ impl ModelProcessorSpec for Qwen3OmniSpec {
             (Modality::Video, 1),
             (Modality::Audio, 10),
         ]))
+    }
+
+    fn vision_processor(
+        &self,
+        _model_config: &Value,
+        _preprocessor_config: &PreProcessorConfig,
+        modality: Modality,
+    ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
+        match modality {
+            Modality::Image | Modality::Video => Ok(Box::new(Qwen3OmniVisionProcessor::new())),
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
     }
 
     fn audio_processor(
