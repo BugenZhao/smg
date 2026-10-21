@@ -33,27 +33,43 @@ use crate::sockets::unlink_stale_socket;
 use crate::{
     eos::EosTokenIds,
     sglang::{
-        aggregate_control, control_outcome, fan_out_sglang_requests,
-        translate_embed_request_sglang, translate_request_sglang, SglangGenerateStream,
-        SglangProfileStart,
+        aggregate_control, constraint_ref as sglang_constraint_ref, control_outcome,
+        fan_out_sglang_requests, translate_embed_request_sglang, translate_request_sglang,
+        SglangGenerateStream, SglangProfileStart,
     },
     sockets::{ensure_ipc_socket_dir, zmq_socket_addresses, Handshake},
     stream::{RequestDeadline, ZmqGenerateStream},
+    structured_outputs::{
+        refuse_unenforceable_constraint, StructuredOutputsBackendConfig, StructuredOutputsSupport,
+    },
     tokenspeed::{
-        fan_out_tokenspeed_requests, translate_request_tokenspeed_for, GridTensors,
-        TokenSpeedGenerateStream,
+        constraint_ref as tokenspeed_constraint_ref, fan_out_tokenspeed_requests,
+        translate_request_tokenspeed_for, GridTensors, TokenSpeedGenerateStream,
     },
     vllm::{
         fan_out_requests, has_media, kv_transfer_params, now_secs, ranked_candidate_count,
         refuse_greedy_choices, translate_media, translate_request_with_media,
-        translated_from_processed, ProcessedMedia, StructuredOutputsBackendConfig, TranslatedMedia,
-        VllmGenerateStream,
+        translated_from_processed, ProcessedMedia, TranslatedMedia, VllmGenerateStream,
     },
 };
 
 /// How long the one-time `get_supported_tasks` utility call may take; the
 /// engine answers it between scheduler steps.
 const SUPPORTED_TASKS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What a connection nobody configured enforces of a structured request, by
+/// dialect: the wire that stamps a backend on each structured request ran
+/// the engine's `auto` (xgrammar, every kind) before this support existed
+/// and keeps it, refusing what it refused; the wires that stamp none judged
+/// nothing ahead of their engine and keep that too, so a gateway's direct
+/// link to an engine on another backend refuses nothing the engine would
+/// enforce. The servicer that launched the engine sets the real support.
+pub(crate) fn default_structured_outputs_support(dialect: ZmqDialect) -> StructuredOutputsSupport {
+    match dialect {
+        ZmqDialect::Vllm => StructuredOutputsSupport::default(),
+        ZmqDialect::TokenSpeed | ZmqDialect::Sglang => StructuredOutputsBackendConfig::Other.into(),
+    }
+}
 
 /// The connector params a refused request must still release: NIXL's
 /// `do_remote_prefill` marks a PD decode side whose prefill side holds blocks
@@ -104,10 +120,11 @@ pub(crate) struct ZmqConnectionMeta {
     /// (the model id is a repo id, not a local directory). Lives here rather
     /// than on the client so every clone shares the one adoption.
     tokenizer_eos: OnceLock<EosTokenIds>,
-    /// The engine's structured-output backend config, set once by the caller
-    /// that knows it (the servicer); unset is the engine's `auto`
-    /// ([`StructuredOutputsBackendConfig::default`]).
-    structured_outputs_backend: OnceLock<StructuredOutputsBackendConfig>,
+    /// What the engine enforces of a structured request, set once by the
+    /// caller that knows it (the servicer that launched the engine); unset
+    /// is the engine's `auto`, every kind taken
+    /// ([`StructuredOutputsSupport::default`]).
+    structured_outputs: OnceLock<StructuredOutputsSupport>,
     /// The engine's supported tasks (`get_supported_tasks`), fetched on first
     /// use and kept for the connection, as vLLM's frontend keeps them.
     supported_tasks: tokio::sync::OnceCell<Arc<[String]>>,
@@ -322,7 +339,7 @@ impl ZmqEngineClient {
                 model_id,
                 eos,
                 tokenizer_eos: OnceLock::new(),
-                structured_outputs_backend: OnceLock::new(),
+                structured_outputs: OnceLock::new(),
                 supported_tasks: tokio::sync::OnceCell::new(),
                 request_timeout: OnceLock::new(),
             }),
@@ -349,14 +366,29 @@ impl ZmqEngineClient {
         let _ = self.meta.tokenizer_eos.set(EosTokenIds::from_ids(ids));
     }
 
-    /// Pin the grammar backend for structured-output requests. vLLM's engine
-    /// keeps a single backend per process, chosen by the first request that
-    /// needs one, so the caller resolves it once from the engine's
-    /// `--structured-outputs-config` and every request carries the same one.
-    /// A connection nobody configures (the gateway's own worker link) runs
-    /// the engine's `auto`: xgrammar on every request.
-    pub fn set_structured_outputs_backend(&self, config: StructuredOutputsBackendConfig) {
-        let _ = self.meta.structured_outputs_backend.set(config);
+    /// Set what the engine enforces of a structured request: its grammar
+    /// backend and the constraint kinds that backend compiles, as the
+    /// servicer that launched the engine read them off its configuration.
+    /// Every wire refuses a constraint outside it before the engine
+    /// ([`refuse_unenforceable_constraint`]); the wire that stamps a backend
+    /// on each structured request stamps this one, since such an engine keeps
+    /// the backend of its first structured request for its life. A connection
+    /// nobody configures (the gateway's own worker link) keeps what its wire
+    /// ran before this support existed
+    /// ([`default_structured_outputs_support`]). The first call wins.
+    pub fn set_structured_outputs_support(&self, support: StructuredOutputsSupport) {
+        let _ = self.meta.structured_outputs.set(support);
+    }
+
+    /// What the engine enforces of a structured request
+    /// ([`Self::set_structured_outputs_support`]); until set, the wire's own
+    /// default ([`default_structured_outputs_support`]).
+    fn structured_outputs_support(&self) -> StructuredOutputsSupport {
+        self.meta
+            .structured_outputs
+            .get()
+            .copied()
+            .unwrap_or_else(|| default_structured_outputs_support(self.dialect()))
     }
 
     /// Bound every generate request this connection opens from here on by
@@ -581,12 +613,7 @@ impl ZmqEngineClient {
         } else {
             TranslatedMedia::default()
         };
-        let structured_backend = self
-            .meta
-            .structured_outputs_backend
-            .get()
-            .copied()
-            .unwrap_or_default();
+        let support = self.structured_outputs_support();
         // On the request's own `n`: every sub below carries `n = 1`.
         if let Some(sp) = req.sampling_params.as_ref() {
             refuse_greedy_choices(sp).map_err(tonic::Status::invalid_argument)?;
@@ -611,7 +638,7 @@ impl ZmqEngineClient {
                 sub_media,
                 max_model_len,
                 self.effective_eos(),
-                structured_backend,
+                support,
             )
             .map_err(tonic::Status::invalid_argument)?;
             request.trace_headers.clone_from(&trace_headers);
@@ -754,6 +781,15 @@ impl ZmqEngineClient {
                 "vLLM ZMQ backend expects a vLLM generate request",
             ));
         };
+        // A constraint the engine's grammar backend cannot enforce is refused
+        // here, before anything reaches the engine, as on every wire.
+        if let Some(sp) = req.sampling_params.as_ref() {
+            refuse_unenforceable_constraint(
+                tokenspeed_constraint_ref(sp),
+                self.structured_outputs_support(),
+            )
+            .map_err(tonic::Status::invalid_argument)?;
+        }
         // Sub-streams submitted before a mid-loop failure are dropped with the
         // error, which auto-aborts their engine-side requests.
         let mut streams = Vec::new();
@@ -812,6 +848,15 @@ impl ZmqEngineClient {
                 "this ZMQ backend is not an SGLang scheduler",
             ));
         };
+        // A constraint the engine's grammar backend cannot enforce is refused
+        // here, before anything reaches the engine, as on every wire.
+        if let Some(sp) = req.sampling_params.as_ref() {
+            refuse_unenforceable_constraint(
+                sglang_constraint_ref(sp),
+                self.structured_outputs_support(),
+            )
+            .map_err(tonic::Status::invalid_argument)?;
+        }
         let mut streams = Vec::new();
         for (index, sub) in fan_out_sglang_requests(req).into_iter().enumerate() {
             let mut request =
