@@ -219,6 +219,8 @@ lint() {
         # The default feature set needs no OpenCV: run where the OpenCV libraries are not installed.
         default-build)
             (set -x; cargo check -p llm-multimodal)
+            # Standalone consumers that resolve model files themselves build without `hf-hub`.
+            (set -x; cargo check -p llm-multimodal --no-default-features --all-targets)
             (set -x; cargo check --manifest-path bindings/python/Cargo.toml)
             (set -x; cargo check --manifest-path bindings/golang/Cargo.toml) ;;
         *) echo "ci_rust_tests.sh: unknown lint leg '$1' (all-features, self-hosted, anthropic-only, default-build)" >&2; exit 2 ;;
