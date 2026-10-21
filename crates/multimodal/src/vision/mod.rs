@@ -9,7 +9,7 @@
 //!
 //! - `transforms`: Core image transformations (resize, normalize, crop, etc.)
 //! - `preprocessor_config`: HuggingFace config parsing
-//! - `processor`: Vision processor trait and registry
+//! - `processor`: Vision processor trait
 //! - `processors`: Model-specific implementations (LLaVA, Qwen-VL, etc.)
 //!
 //! Modality-neutral encoder outputs live in [`crate::encoder_inputs`], while
@@ -47,7 +47,7 @@ pub mod transforms;
 pub use preprocessor_config::PreProcessorConfig;
 pub use processor::{
     ModelSpecificValue, PreprocessedEncoderInputs, VideoClipOptions, VisionPreProcessor,
-    VisionPreprocessingContext, VisionProcessorRegistry,
+    VisionPreprocessingContext,
 };
 pub use processors::{
     DeepseekV41Processor, Gemma4Processor, Glm53FlashProcessor, Llama4VisionProcessor,
