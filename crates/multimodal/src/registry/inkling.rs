@@ -107,11 +107,19 @@ impl ModelProcessorSpec for InklingSpec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image => Ok(Box::new(InklingImageProcessor::new())),
+            Modality::Image => Ok(Box::new(
+                InklingImageProcessor::from_preprocessor_config(preprocessor_config).map_err(
+                    |error| ModelRegistryError::InvalidPreprocessorConfig {
+                        spec: self.name(),
+                        modality,
+                        reason: error.to_string(),
+                    },
+                )?,
+            )),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,

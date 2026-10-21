@@ -45,6 +45,12 @@ pub enum ModelRegistryError {
         spec: &'static str,
         modality: Modality,
     },
+    #[error("the {modality} processor of model spec {spec} cannot serve its preprocessor config: {reason}")]
+    InvalidPreprocessorConfig {
+        spec: &'static str,
+        modality: Modality,
+        reason: String,
+    },
     #[error("model spec {spec} supports at most {limit} {modality} inputs; got {requested}")]
     ModalityLimitExceeded {
         spec: &'static str,

@@ -132,11 +132,13 @@ impl ModelProcessorSpec for Qwen3OmniSpec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image | Modality::Video => Ok(Box::new(Qwen3OmniVisionProcessor::new())),
+            Modality::Image | Modality::Video => Ok(Box::new(
+                Qwen3OmniVisionProcessor::from_config_for(preprocessor_config, modality),
+            )),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,

@@ -102,11 +102,13 @@ impl ModelProcessorSpec for DeepseekV41VisionSpec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image => Ok(Box::new(DeepseekV41Processor::new())),
+            Modality::Image => Ok(Box::new(DeepseekV41Processor::from_preprocessor_config(
+                preprocessor_config,
+            ))),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,
@@ -209,10 +211,10 @@ mod tests {
         let config = json!({"model_type": "deepseek_v41", "image_token_id": IMAGE_TOKEN_ID});
         assert!(DeepseekV41VisionSpec.matches(&metadata(&tokenizer, &config)));
         assert_eq!(
-            crate::VisionProcessorRegistry::with_defaults()
-                .find("/models/local-checkpoint", Some("deepseek_v41"))
+            DeepseekV41VisionSpec
+                .vision_processor(&config, &PreProcessorConfig::default(), Modality::Image)
                 .map(|processor| processor.model_name()),
-            Some("deepseek_v41")
+            Ok("deepseek_v41")
         );
         for model_id in ["deepseek-ai/DeepSeek-V4.1-Flash", "DEEPSEEK_V41-local"] {
             let neutral = json!({});

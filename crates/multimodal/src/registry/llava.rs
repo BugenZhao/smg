@@ -58,11 +58,14 @@ impl ModelProcessorSpec for LlavaSpec {
     fn vision_processor(
         &self,
         model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image => Ok(Box::new(LlavaProcessor::from_config(model_config))),
+            Modality::Image => Ok(Box::new(LlavaProcessor::from_configs(
+                model_config,
+                preprocessor_config,
+            ))),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,
@@ -122,11 +125,14 @@ impl ModelProcessorSpec for LlavaNextSpec {
     fn vision_processor(
         &self,
         model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image => Ok(Box::new(LlavaNextProcessor::from_config(model_config))),
+            Modality::Image => Ok(Box::new(LlavaNextProcessor::from_configs(
+                model_config,
+                preprocessor_config,
+            ))),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,

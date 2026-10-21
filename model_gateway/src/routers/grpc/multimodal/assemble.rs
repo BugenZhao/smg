@@ -1655,7 +1655,7 @@ mod tests {
     fn a_qwen3_vl_video_batch_assembles_with_its_own_sizes_key() {
         use llm_multimodal::{
             vision::Qwen3VLProcessor, ModelMetadata, ModelRegistry, PreProcessorConfig, Tokenizer,
-            VideoSource, VisionPreProcessor,
+            VideoClipOptions, VideoSource, VisionPreProcessor,
         };
 
         struct NoTokenizer;
@@ -1700,7 +1700,7 @@ mod tests {
             })
             .collect();
         let preprocessed = processor
-            .preprocess_video(&frames, &config)
+            .preprocess_video(&frames, &VideoClipOptions::sampled_at(2.0))
             .expect("video preprocess");
         let rows = preprocessed.encoder_input.shape()[0];
         let features = preprocessed.encoder_input.shape()[1];

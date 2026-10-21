@@ -331,11 +331,19 @@ impl ModelProcessorSpec for Gemma4Spec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image | Modality::Video => Ok(Box::new(Gemma4Processor::new())),
+            Modality::Image | Modality::Video => Ok(Box::new(
+                Gemma4Processor::from_config_for(preprocessor_config, modality).map_err(
+                    |error| ModelRegistryError::InvalidPreprocessorConfig {
+                        spec: self.name(),
+                        modality,
+                        reason: error.to_string(),
+                    },
+                )?,
+            )),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,

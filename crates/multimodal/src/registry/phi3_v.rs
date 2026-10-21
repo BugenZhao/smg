@@ -49,11 +49,13 @@ impl ModelProcessorSpec for Phi3VisionSpec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image => Ok(Box::new(Phi3VisionProcessor::new())),
+            Modality::Image => Ok(Box::new(
+                Phi3VisionProcessor::new().with_normalization_of(preprocessor_config),
+            )),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,

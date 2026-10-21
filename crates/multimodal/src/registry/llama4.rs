@@ -119,11 +119,13 @@ impl ModelProcessorSpec for Llama4Spec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image => Ok(Box::new(Llama4VisionProcessor::new())),
+            Modality::Image => Ok(Box::new(Llama4VisionProcessor::from_preprocessor_config(
+                preprocessor_config,
+            ))),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,

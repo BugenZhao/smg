@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use image::DynamicImage;
 
-use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
+use super::transforms::TransformError;
 pub use crate::encoder_inputs::{ModelSpecificValue, PreprocessedEncoderInputs};
 use crate::{encoder_inputs::EncoderDtype, types::RgbFrameRef};
 
@@ -64,8 +64,8 @@ impl PreprocessedEncoderInputs {
     }
 }
 
-/// Request-scoped inputs to one preprocessing call, beside the model's static
-/// [`PreProcessorConfig`].
+/// Request-scoped inputs to one image preprocessing call, beside the
+/// configuration the processor resolved at construction.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VisionPreprocessingContext {
     /// Context tokens left for the call's images: the engine's context length
@@ -76,10 +76,39 @@ pub struct VisionPreprocessingContext {
     pub token_budget: Option<usize>,
 }
 
+/// What a video preprocessor reads about one clip besides its frames.
+///
+/// Both are set per request (by the media connector's sampling and the
+/// caller's `max_long_side_pixel`), not by the checkpoint, so they are
+/// arguments of each call rather than part of the configuration a processor
+/// resolves at construction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VideoClipOptions {
+    /// The rate the clip's frames were sampled at, in frames per second.
+    pub sample_fps: f32,
+    /// The long-side cap the caller asked for, when it named one; the frames
+    /// were already scaled to it.
+    pub max_long_side_pixel: Option<u32>,
+}
+
+impl VideoClipOptions {
+    /// A clip sampled at `sample_fps` with no long-side cap.
+    pub fn sampled_at(sample_fps: f32) -> Self {
+        Self {
+            sample_fps,
+            max_long_side_pixel: None,
+        }
+    }
+}
+
 /// Trait for model-specific vision preprocessors.
 ///
 /// Each vision model (LLaVA, Qwen-VL, Phi3-Vision, etc.) implements this trait
-/// to provide the correct preprocessing pipeline.
+/// to provide the correct preprocessing pipeline. An instance is built by its
+/// model's spec ([`ModelProcessorSpec::vision_processor`](crate::ModelProcessorSpec::vision_processor))
+/// for one modality's preprocessor config and retains the parameters it
+/// resolved from it; request methods receive only the media and what is set
+/// per request.
 pub trait VisionPreProcessor: Send + Sync {
     /// Whether preprocessing individual images and concatenating their outputs
     /// is equivalent to preprocessing the whole batch, including metadata.
@@ -118,14 +147,12 @@ pub trait VisionPreProcessor: Send + Sync {
     ///
     /// # Arguments
     /// * `images` - Input images to preprocess
-    /// * `config` - Preprocessor configuration from HuggingFace
     ///
     /// # Returns
     /// Preprocessed encoder inputs ready for the model, or an error.
     fn preprocess(
         &self,
         images: &[DynamicImage],
-        config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError>;
 
     /// [`preprocess`](Self::preprocess) under a request's context. A processor
@@ -134,10 +161,9 @@ pub trait VisionPreProcessor: Send + Sync {
     fn preprocess_with_context(
         &self,
         images: &[DynamicImage],
-        config: &PreProcessorConfig,
         _context: &VisionPreprocessingContext,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        self.preprocess(images, config)
+        self.preprocess(images)
     }
 
     /// Preprocess a batch of images straight into `dtype`, the wire's dtype,
@@ -150,7 +176,6 @@ pub trait VisionPreProcessor: Send + Sync {
     fn preprocess_wire(
         &self,
         _images: &[DynamicImage],
-        _config: &PreProcessorConfig,
         _dtype: EncoderDtype,
     ) -> Option<Result<PreprocessedEncoderInputs, TransformError>> {
         None
@@ -164,7 +189,7 @@ pub trait VisionPreProcessor: Send + Sync {
     fn preprocess_video(
         &self,
         _frames: &[DynamicImage],
-        _config: &PreProcessorConfig,
+        _clip: &VideoClipOptions,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         Err(TransformError::ShapeError(format!(
             "{} does not support video preprocessing",
@@ -178,7 +203,7 @@ pub trait VisionPreProcessor: Send + Sync {
     fn preprocess_video_rgb(
         &self,
         _frames: &[RgbFrameRef<'_>],
-        _config: &PreProcessorConfig,
+        _clip: &VideoClipOptions,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         Err(TransformError::ShapeError(format!(
             "{} does not support RGB video preprocessing",
@@ -189,22 +214,15 @@ pub trait VisionPreProcessor: Send + Sync {
     /// Calculate the number of vision tokens for a given image size.
     ///
     /// This is used to determine how many placeholder tokens to insert
-    /// in the text input before the image has been fully processed. A
-    /// config the implementation cannot read, or a size its resize rule
-    /// refuses, is the error the preprocessing reports for it, never a count
-    /// of zero or one taken from other settings; the arithmetic itself
-    /// cannot fail.
+    /// in the text input before the image has been fully processed. A size
+    /// its resize rule refuses is the error the preprocessing reports for it,
+    /// never a count of zero or one taken from other settings; the arithmetic
+    /// itself cannot fail.
     ///
     /// # Arguments
     /// * `width` - Image width after preprocessing
     /// * `height` - Image height after preprocessing
-    /// * `config` - Preprocessor configuration
-    fn calculate_num_tokens(
-        &self,
-        width: u32,
-        height: u32,
-        config: &PreProcessorConfig,
-    ) -> Result<usize, TransformError>;
+    fn calculate_num_tokens(&self, width: u32, height: u32) -> Result<usize, TransformError>;
 
     /// Get the model family name for identification.
     fn model_name(&self) -> &'static str;
@@ -212,8 +230,8 @@ pub trait VisionPreProcessor: Send + Sync {
     /// Get the expected image size after preprocessing.
     ///
     /// Some models have fixed sizes, others are dynamic.
-    fn get_processed_size(&self, config: &PreProcessorConfig) -> Option<(u32, u32)> {
-        config.get_target_size()
+    fn get_processed_size(&self) -> Option<(u32, u32)> {
+        None
     }
 }
 

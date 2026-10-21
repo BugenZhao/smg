@@ -80,9 +80,7 @@ pub(crate) fn runtime_transparency_policy(runtime: RuntimeType) -> TransparencyP
 mod tests {
     use std::{sync::Arc, time::Instant};
 
-    use llm_multimodal::{
-        PreProcessorConfig, PreprocessedEncoderInputs, TransformError, VisionPreProcessor,
-    };
+    use llm_multimodal::{PreprocessedEncoderInputs, TransformError, VisionPreProcessor};
     use openai_protocol::worker::HealthCheckConfig;
 
     use super::*;
@@ -316,12 +314,7 @@ mod tests {
         fn default_std(&self) -> [f64; 3] {
             [1.0; 3]
         }
-        fn calculate_num_tokens(
-            &self,
-            _: u32,
-            _: u32,
-            _: &PreProcessorConfig,
-        ) -> Result<usize, TransformError> {
+        fn calculate_num_tokens(&self, _: u32, _: u32) -> Result<usize, TransformError> {
             Ok(1)
         }
         fn model_name(&self) -> &'static str {
@@ -330,7 +323,6 @@ mod tests {
         fn preprocess(
             &self,
             _: &[image::DynamicImage],
-            _: &PreProcessorConfig,
         ) -> Result<PreprocessedEncoderInputs, TransformError> {
             Err(TransformError::ShapeError("probe".to_string()))
         }

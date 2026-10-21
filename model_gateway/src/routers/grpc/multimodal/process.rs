@@ -12,7 +12,7 @@ use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, EncoderDtype, EncoderFieldLayouts, ImageFrame,
     MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec, PlaceholderRange,
     PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, TrackedMedia, TrackerOutput,
-    TransparencyPolicy, VideoClip, VisionPreProcessor,
+    TransparencyPolicy, VideoClip, VideoClipOptions, VisionPreProcessor,
 };
 use llm_tokenizer::TokenizerTrait;
 use rayon::prelude::*;
@@ -497,11 +497,10 @@ async fn preprocess_modality(
     media: &MediaBatch,
     ctx: &PlanContext<'_>,
 ) -> Result<PreprocessedEncoderInputs> {
-    let pp_config = preprocessor_config_for(ctx.model_config, media.modality()).clone();
-    if let Some(preprocessed) = cached_images(media, ctx, &pp_config).await? {
+    if let Some(preprocessed) = cached_images(media, ctx).await? {
         return Ok(preprocessed);
     }
-    preprocess_batch(media, ctx, pp_config).await
+    preprocess_batch(media, ctx).await
 }
 
 /// The per-image path through the pixel cache for an image batch the cache
@@ -512,7 +511,6 @@ async fn preprocess_modality(
 async fn cached_images(
     media: &MediaBatch,
     ctx: &PlanContext<'_>,
-    pp_config: &PreProcessorConfig,
 ) -> Result<Option<PreprocessedEncoderInputs>> {
     let MediaBatch::Images(images) = media else {
         return Ok(None);
@@ -530,7 +528,7 @@ async fn cached_images(
         "model_id": ctx.model_id,
         "model_type": ctx.model_type,
         "model_config": ctx.model_config.config,
-        "preprocessor_config": pp_config,
+        "preprocessor_config": preprocessor_config_for(ctx.model_config, Modality::Image),
         // A one-pass result is only right for its own wire.
         "image_wire_dtype": ctx.image_wire_dtype.map(|dtype| dtype.to_string()),
         "transparency": ctx.transparency,
@@ -566,7 +564,6 @@ async fn cached_images(
                 image.clone(),
                 ctx.vision_processors.clone(),
                 ctx.model_id.to_string(),
-                pp_config.clone(),
                 fingerprint,
                 ctx.image_wire_dtype,
             )
@@ -611,7 +608,6 @@ async fn cached_images(
 async fn preprocess_batch(
     media: &MediaBatch,
     ctx: &PlanContext<'_>,
-    pp_config: PreProcessorConfig,
 ) -> Result<PreprocessedEncoderInputs> {
     let vision_processors = ctx.vision_processors.clone();
     let media_for_preprocess = media.clone(); // cheap Arc refcount bumps
@@ -662,26 +658,24 @@ async fn preprocess_batch(
                         .map_err(llm_multimodal::MultiModalError::Media)
                 })
                 .collect::<Result<_, _>>()?;
-            preprocess_images(processor.as_ref(), &raw_images, &pp_config, image_wire_dtype)
+            preprocess_images(processor.as_ref(), &raw_images, image_wire_dtype)
         }
         MediaBatch::Videos(videos) => {
             let processor = vision_processors.video()?;
             // The processor takes one decoded clip at a time; the clips are
             // joined into one batch afterwards, laid out as if processed together.
             let preprocess_clip = |video: &VideoClip| -> Result<PreprocessedEncoderInputs> {
-                let video_pp_config = video_request_config(pp_config.clone(), video);
+                let clip = video_clip_options(video);
 
                 if !video.frames().is_empty() {
                     return processor
-                        .preprocess_video(video.frames(), &video_pp_config)
+                        .preprocess_video(video.frames(), &clip)
                         .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"));
                 }
 
                 if let Some(rgb_video) = video.rgb_video() {
                     match rgb_video.frame_refs() {
-                        Ok(frame_refs) => match processor
-                            .preprocess_video_rgb(&frame_refs, &video_pp_config)
-                        {
+                        Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs, &clip) {
                             Ok(preprocessed) => return Ok(preprocessed),
                             Err(error) => {
                                 warn!(
@@ -703,7 +697,7 @@ async fn preprocess_batch(
                     .materialized_frames()
                     .map_err(|e| anyhow::anyhow!("Video frame materialization failed: {e}"))?;
                 processor
-                    .preprocess_video(&frames, &video_pp_config)
+                    .preprocess_video(&frames, &clip)
                     .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
             };
 
@@ -730,19 +724,14 @@ async fn preprocess_batch(
     .map_err(|e| anyhow::Error::new(e).context("Preprocessing task panicked"))?
 }
 
-/// The preprocessor config for one clip: its sampled frame rate and, when the
-/// caller named a `max_long_side_pixel` tier, that tier, so the processor can
-/// size the frames the way the caller asked.
-fn video_request_config(mut config: PreProcessorConfig, video: &VideoClip) -> PreProcessorConfig {
-    config
-        .extra
-        .insert("fps".to_string(), serde_json::json!(video.sample_fps()));
-    if let Some(tier) = video.max_long_side_pixel() {
-        config
-            .extra
-            .insert("max_long_side_pixel".to_string(), serde_json::json!(tier));
+/// What the processor reads about one clip besides its frames: its sampled
+/// frame rate and, when the caller named a `max_long_side_pixel` tier, that
+/// tier, so the processor can size the frames the way the caller asked.
+fn video_clip_options(video: &VideoClip) -> VideoClipOptions {
+    VideoClipOptions {
+        sample_fps: video.sample_fps(),
+        max_long_side_pixel: video.max_long_side_pixel(),
     }
-    config
 }
 
 /// The config a modality is preprocessed with: video's own when the checkpoint ships one.
@@ -780,7 +769,6 @@ async fn preprocess_image_cached(
     image: Arc<ImageFrame>,
     vision_processors: Arc<VisionProcessors>,
     model_id: String,
-    pp_config: PreProcessorConfig,
     fingerprint: u64,
     image_wire_dtype: Option<EncoderDtype>,
 ) -> Result<PreprocessedEncoderInputs> {
@@ -796,7 +784,6 @@ async fn preprocess_image_cached(
 
     let preprocessed = preprocess_image_batch(
         vision_processors,
-        pp_config,
         std::slice::from_ref(&image),
         image_wire_dtype,
     )
@@ -816,7 +803,6 @@ async fn preprocess_image_cached(
 
 async fn preprocess_image_batch(
     vision_processors: Arc<VisionProcessors>,
-    pp_config: PreProcessorConfig,
     images: &[Arc<ImageFrame>],
     image_wire_dtype: Option<EncoderDtype>,
 ) -> Result<PreprocessedEncoderInputs> {
@@ -832,12 +818,7 @@ async fn preprocess_image_batch(
             })
             .collect::<Result<_, _>>()?;
         let processor = vision_processors.image()?;
-        preprocess_images(
-            processor.as_ref(),
-            &raw_images,
-            &pp_config,
-            image_wire_dtype,
-        )
+        preprocess_images(processor.as_ref(), &raw_images, image_wire_dtype)
     })
     .await
     .map_err(|e| anyhow::Error::new(e).context("Preprocessing task panicked"))?
@@ -849,12 +830,11 @@ async fn preprocess_image_batch(
 fn preprocess_images(
     processor: &dyn VisionPreProcessor,
     images: &[image::DynamicImage],
-    pp_config: &PreProcessorConfig,
     wire_dtype: Option<EncoderDtype>,
 ) -> Result<PreprocessedEncoderInputs> {
     wire_dtype
-        .and_then(|dtype| processor.preprocess_wire(images, pp_config, dtype))
-        .unwrap_or_else(|| processor.preprocess(images, pp_config))
+        .and_then(|dtype| processor.preprocess_wire(images, dtype))
+        .unwrap_or_else(|| processor.preprocess(images))
         .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
 }
 
@@ -1076,14 +1056,14 @@ mod tests {
             0.8,
         );
 
-        let config = video_request_config(PreProcessorConfig::default(), &video);
+        let clip = video_clip_options(&video);
 
-        assert!((config.get_extra::<f32>("fps").unwrap() - 0.8).abs() < 1e-6);
-        assert!(config.get_extra::<u32>("max_long_side_pixel").is_none());
+        assert!((clip.sample_fps - 0.8).abs() < 1e-6);
+        assert!(clip.max_long_side_pixel.is_none());
     }
 
     #[test]
-    fn decoded_video_tier_reaches_the_processor_config() {
+    fn decoded_video_tier_reaches_the_processor() {
         let video = VideoClip::new_with_sample_fps(
             Vec::new(),
             Bytes::new(),
@@ -1093,9 +1073,9 @@ mod tests {
         )
         .with_max_long_side_pixel(Some(1008));
 
-        let config = video_request_config(PreProcessorConfig::default(), &video);
+        let clip = video_clip_options(&video);
 
-        assert_eq!(config.get_extra::<u32>("max_long_side_pixel"), Some(1008));
+        assert_eq!(clip.max_long_side_pixel, Some(1008));
     }
 
     #[test]

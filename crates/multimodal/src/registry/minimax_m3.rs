@@ -392,11 +392,19 @@ impl ModelProcessorSpec for MiniMaxM3VisionSpec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image | Modality::Video => Ok(Box::new(MiniMaxM3VisionProcessor::new())),
+            Modality::Image | Modality::Video => Ok(Box::new(
+                MiniMaxM3VisionProcessor::from_preprocessor_config(preprocessor_config).map_err(
+                    |error| ModelRegistryError::InvalidPreprocessorConfig {
+                        spec: self.name(),
+                        modality,
+                        reason: error.to_string(),
+                    },
+                )?,
+            )),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,

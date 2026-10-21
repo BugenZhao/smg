@@ -478,11 +478,13 @@ impl ModelProcessorSpec for MuseSparkSpec {
     fn vision_processor(
         &self,
         _model_config: &Value,
-        _preprocessor_config: &PreProcessorConfig,
+        preprocessor_config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
         match modality {
-            Modality::Image | Modality::Video => Ok(Box::new(MuseSparkVisionProcessor::new())),
+            Modality::Image | Modality::Video => Ok(Box::new(
+                MuseSparkVisionProcessor::from_preprocessor_config(preprocessor_config),
+            )),
             _ => Err(ModelRegistryError::UnsupportedModality {
                 spec: self.name(),
                 modality,
