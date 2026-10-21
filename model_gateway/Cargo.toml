@@ -97,7 +97,7 @@ smg-mcp.workspace = true
 smg-external-router = { workspace = true, default-features = false }
 kv-index.workspace = true
 smg-data-connector.workspace = true
-llm-multimodal = { workspace = true, default-features = false }
+llm-multimodal = { workspace = true, default-features = false, features = ["hf-hub"] }
 smg-mm-rdma.workspace = true
 smg-wasm = { workspace = true, features = ["storage-hooks"] }
 smg-mesh.workspace = true
